@@ -1,0 +1,138 @@
+trainer: equiformer_v3_dens_trainer
+
+dataset:
+  train:
+    format: lmdb
+    src: data/s2ef/train_100
+    key_mapping:
+      y: energy
+      force: forces
+    transforms:
+      normalizer:
+        energy:
+          mean: -0.7554450631141663
+          stdev: 2.887317180633545
+        forces:
+          mean: 0.0
+          stdev: 2.887317180633545
+  val:
+    src: data/s2ef/val_20
+
+logger: tensorboard
+
+task:
+  strict_load: True
+
+outputs:
+  energy:
+    shape: 1
+    level: system
+  forces:
+    irrep_dim: 1
+    level: atom
+    train_on_free_atoms: True
+    eval_on_free_atoms: True
+
+loss_functions:
+  - energy:
+      fn: mae
+      coefficient: 4
+  - forces:
+      fn: l2mae
+      coefficient: 100
+
+evaluation_metrics:
+  primary_metric: forces_mae
+  metrics:
+    energy:
+      - mae
+    forces:
+      - mae
+      - cosine_similarity
+      - magnitude_error
+
+model:
+  name: equiformer_v3
+  use_pbc: True
+  use_pbc_single: False
+  otf_graph: True
+  regress_forces: True
+  regress_stress: False
+  direct_prediction: True
+  max_neighbors: 12
+  max_radius: 8.0
+  num_radial_basis: 32
+  max_num_elements: 90
+  num_layers: 2
+  num_channels: 32
+  attn_hidden_channels: 16
+  num_heads: 4
+  attn_alpha_channels: 16
+  attn_value_channels: 8
+  ffn_hidden_channels: 64
+  norm_type: merge_layer_norm
+  lmax: 2
+  mmax: 1
+  attn_grid_resolution_list: [8, 4]
+  ffn_grid_resolution_list: [8, 8]
+  edge_channels: 32
+  use_atom_edge_embedding: True
+  use_envelope: True
+  attn_activation: sep-merge_gates2_swiglu
+  use_attn_renorm: True
+  use_add_merge: False
+  use_rad_l_parametrization: True
+  softcap: null
+  ffn_activation: sep-merge_gates2_swiglu
+  use_grid_mlp: True
+  use_gate_force_head: True
+  alpha_drop: 0.0
+  attn_mask_rate: 0.0
+  attn_weights_drop: 0.0
+  value_drop: 0.0
+  drop_path_rate: 0.0
+  proj_drop: 0.0
+  ffn_drop: 0.0
+  gradient_checkpointing_block_list: [0, 0]
+  enforce_max_neighbors_strictly: True
+
+optim:
+  batch_size: 4
+  eval_batch_size: 4
+  grad_accumulation_steps: 1
+  load_balancing: False
+  load_balancing_on_error: warn_and_no_balance
+  num_workers: 0
+  lr_initial: 0.0002
+  optimizer: AdamW
+  optimizer_params:
+    weight_decay: 0.001
+  scheduler: LambdaLR
+  scheduler_params:
+    lambda_type: cosine
+    warmup_factor: 0.2
+    warmup_epochs: 0.1
+    lr_min_factor: 0.01
+  max_epochs: 1
+  clip_grad_norm: 100
+  ema_decay: null
+  eval_every: 1000
+  use_compile: False
+  use_denoising_pos: False
+  denoising_pos_coefficient: 10
+  denoising_pos_params:
+    prob: 0.0
+    fixed_noise_std: True
+    std: 0.1
+    corrupt_ratio: null
+    all_atoms: False
+    coefficient_linear_decay_min_factor: null
+    num_steps: 50
+    std_low: 0.01
+    std_high: 0.5
+    min_num_atoms: null
+    strict_max_ratio: null
+    max_force_norm: null
+    max_stress_norm: null
+    early_epochs: null
+    max_mean_force_norm: null
