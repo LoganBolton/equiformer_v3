@@ -1,5 +1,29 @@
 import torch
-from torch_scatter import scatter
+try:
+    from torch_scatter import scatter
+except Exception:
+    def scatter(src, index, dim=0, dim_size=None, reduce="sum"):
+        if dim != 0:
+            raise NotImplementedError("Fallback scatter only supports dim=0.")
+        if dim_size is None:
+            dim_size = int(index.max().item()) + 1 if index.numel() > 0 else 0
+
+        output = src.new_zeros((dim_size, *src.shape[1:]))
+        if reduce in {"sum", "add"}:
+            output.index_add_(0, index, src)
+            return output
+        if reduce == "mean":
+            output.index_add_(0, index, src)
+            counts = src.new_zeros((dim_size,))
+            counts.index_add_(0, index, src.new_ones((src.shape[0],)))
+            counts = counts.clamp_min(1).view(dim_size, *([1] * (src.dim() - 1)))
+            return output / counts
+        if reduce == "max":
+            output.fill_(-torch.inf)
+            for row, dst in enumerate(index.tolist()):
+                output[dst] = torch.maximum(output[dst], src[row])
+            return output
+        raise ValueError(f"Unsupported fallback scatter reduce={reduce!r}.")
 from .transformer_block import (
     EquivariantGraphAttention,
     FeedForwardNetwork,

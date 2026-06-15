@@ -13,7 +13,11 @@ from functools import partial
 
 from e3nn import o3
 
-from fairchem.core.models.base import GraphModelMixin
+try:
+    from fairchem.core.models.base import GraphModelMixin
+except Exception:
+    class GraphModelMixin:
+        pass
 
 from models.equiformer_v3.edge_rot_mat import init_edge_rot_mat
 from models.equiformer_v3.envelope import PolynomialEnvelope

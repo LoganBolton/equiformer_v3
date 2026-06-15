@@ -16,6 +16,8 @@ import time
 from math import pi
 from pathlib import Path
 
+sys.dont_write_bytecode = True
+
 import torch
 from torch_geometric.data import Data
 from torch_geometric.loader import DataLoader
@@ -29,6 +31,8 @@ if str(TASK_DIR) not in sys.path:
     sys.path.insert(0, str(TASK_DIR))
 if str(BENCHMARKS_ROOT) not in sys.path:
     sys.path.insert(0, str(BENCHMARKS_ROOT))
+
+os.environ.setdefault("MPLCONFIGDIR", str(TASK_DIR / ".matplotlib-cache"))
 
 # gaunt_self_tensor_product.py loads const_wigner2gaunt.pt from the process cwd.
 os.chdir(TASK_DIR)
@@ -51,7 +55,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--epochs", type=int, default=1000)
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--learning-rate", type=float, default=1e-4)
-    parser.add_argument("--batch-size", type=int, default=1)
+    parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--success-margin", type=float, default=0.1)
     parser.add_argument("--stop-at-accuracy", type=float, default=1.0)
     parser.add_argument("--print-freq", type=int, default=10)

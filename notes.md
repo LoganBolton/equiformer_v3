@@ -1,0 +1,1 @@
+equiformerv3 can do 5 ring. can't do 10 ring
