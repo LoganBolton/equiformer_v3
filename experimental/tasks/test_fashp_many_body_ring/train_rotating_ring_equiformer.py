@@ -15,12 +15,14 @@ import sys
 import time
 from math import pi
 from pathlib import Path
+from typing import Any
 
 sys.dont_write_bytecode = True
 
 import torch
 from torch_geometric.data import Data
-from torch_geometric.loader import DataLoader
+from torch_geometric.loader import DataListLoader, DataLoader
+from torch_geometric.nn import DataParallel as GeometricDataParallel
 
 
 TASK_DIR = Path(__file__).resolve().parent
@@ -55,10 +57,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--epochs", type=int, default=1000)
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--learning-rate", type=float, default=1e-4)
-    parser.add_argument("--batch-size", type=int, default=64)
+    parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--success-margin", type=float, default=0.1)
     parser.add_argument("--stop-at-accuracy", type=float, default=1.0)
     parser.add_argument("--print-freq", type=int, default=10)
+    parser.add_argument(
+        "--gpu-ids",
+        type=int,
+        nargs="+",
+        default=None,
+        help="CUDA device IDs for graph DataParallel. Defaults to all visible GPUs.",
+    )
+    parser.add_argument(
+        "--no-data-parallel",
+        action="store_true",
+        help="Disable graph DataParallel even when multiple CUDA devices are visible.",
+    )
 
     parser.add_argument("--ring-n-graphs", type=int, default=100)
     parser.add_argument("--ring-seed", type=int, default=0)
@@ -196,39 +210,89 @@ def accuracy_and_margin(logits: torch.Tensor, targets: torch.Tensor, success_mar
     return float(accuracy), float(margin_accuracy)
 
 
+def resolve_device(args: argparse.Namespace) -> tuple[torch.device, list[int]]:
+    requested = torch.device(args.device)
+    if requested.type != "cuda":
+        return requested, []
+    if not torch.cuda.is_available():
+        raise ValueError("--device requested CUDA, but torch.cuda.is_available() is False.")
+
+    if args.gpu_ids is not None:
+        device_ids = list(args.gpu_ids)
+    elif requested.index is not None:
+        device_ids = [requested.index]
+    else:
+        device_ids = list(range(torch.cuda.device_count()))
+
+    if not device_ids:
+        raise ValueError("No CUDA device IDs were selected.")
+    if max(device_ids) >= torch.cuda.device_count() or min(device_ids) < 0:
+        raise ValueError(
+            f"Selected --gpu-ids {device_ids}, but only {torch.cuda.device_count()} CUDA devices are visible."
+        )
+
+    primary_device = torch.device(f"cuda:{device_ids[0]}")
+    if args.no_data_parallel or len(device_ids) < 2:
+        return primary_device, []
+    return primary_device, device_ids
+
+
+def make_loader(dataset: list[Data], batch_size: int, shuffle: bool, use_data_parallel: bool) -> Any:
+    loader_class = DataListLoader if use_data_parallel else DataLoader
+    return loader_class(dataset, batch_size=batch_size, shuffle=shuffle)
+
+
+def batch_targets(batch: Any, device: torch.device) -> torch.Tensor:
+    if isinstance(batch, list):
+        return torch.cat([data.y for data in batch], dim=0).to(device)
+    return batch.y
+
+
+def batch_num_graphs(batch: Any) -> int:
+    if isinstance(batch, list):
+        return len(batch)
+    return batch.num_graphs
+
+
 def run_epoch(
     model: torch.nn.Module,
-    loader: DataLoader,
+    loader: Any,
     optimizer: torch.optim.Optimizer,
     device: torch.device,
+    use_data_parallel: bool,
 ) -> float:
     model.train()
     total_loss = 0.0
     for batch in loader:
-        batch = batch.to(device)
+        if not use_data_parallel:
+            batch = batch.to(device)
         optimizer.zero_grad()
         logits = model(batch)
-        loss = torch.nn.functional.cross_entropy(logits, batch.y)
+        targets = batch_targets(batch, logits.device)
+        loss = torch.nn.functional.cross_entropy(logits, targets)
         loss.backward()
         optimizer.step()
-        total_loss += loss.item() * batch.num_graphs
+        total_loss += loss.item() * batch_num_graphs(batch)
     return total_loss / len(loader.dataset)
 
 
 @torch.no_grad()
 def evaluate(
     model: torch.nn.Module,
-    loader: DataLoader,
+    loader: Any,
     device: torch.device,
     success_margin: float,
+    use_data_parallel: bool,
 ) -> tuple[float, float, torch.Tensor]:
     model.eval()
     logits_parts = []
     target_parts = []
     for batch in loader:
-        batch = batch.to(device)
-        logits_parts.append(model(batch).detach().cpu())
-        target_parts.append(batch.y.detach().cpu())
+        if not use_data_parallel:
+            batch = batch.to(device)
+        logits = model(batch)
+        logits_parts.append(logits.detach().cpu())
+        target_parts.append(batch_targets(batch, logits.device).detach().cpu())
 
     logits = torch.cat(logits_parts, dim=0)
     targets = torch.cat(target_parts, dim=0)
@@ -245,11 +309,29 @@ def train(args: argparse.Namespace) -> dict[str, object]:
     random.seed(args.seed)
     torch.manual_seed(args.seed)
 
-    device = torch.device(args.device)
+    device, data_parallel_device_ids = resolve_device(args)
+    use_data_parallel = len(data_parallel_device_ids) > 1
     dataset = create_ring_pyg_dataset(args)
-    train_loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True)
-    eval_loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False)
-    model = make_model(args).to(device)
+    train_loader = make_loader(dataset, args.batch_size, shuffle=True, use_data_parallel=use_data_parallel)
+    eval_loader = make_loader(dataset, args.batch_size, shuffle=False, use_data_parallel=use_data_parallel)
+
+    base_model = make_model(args)
+    if use_data_parallel:
+        if args.batch_size < len(data_parallel_device_ids):
+            raise ValueError(
+                f"--batch-size ({args.batch_size}) must be at least the number of DataParallel GPUs "
+                f"({len(data_parallel_device_ids)})."
+            )
+        model = GeometricDataParallel(
+            base_model,
+            device_ids=data_parallel_device_ids,
+            output_device=data_parallel_device_ids[0],
+        ).to(device)
+        print(f"Using graph DataParallel on CUDA devices {data_parallel_device_ids}", flush=True)
+    else:
+        model = base_model.to(device)
+        print(f"Using device {device}", flush=True)
+
     optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)
 
     best_accuracy = 0.0
@@ -261,8 +343,14 @@ def train(args: argparse.Namespace) -> dict[str, object]:
 
     for epoch in range(1, args.epochs + 1):
         epoch_start = time.perf_counter()
-        final_loss = run_epoch(model, train_loader, optimizer, device)
-        accuracy, margin_accuracy, final_logits = evaluate(model, eval_loader, device, args.success_margin)
+        final_loss = run_epoch(model, train_loader, optimizer, device, use_data_parallel)
+        accuracy, margin_accuracy, final_logits = evaluate(
+            model,
+            eval_loader,
+            device,
+            args.success_margin,
+            use_data_parallel,
+        )
         best_accuracy = max(best_accuracy, accuracy)
         best_margin_accuracy = max(best_margin_accuracy, margin_accuracy)
         final_epoch = epoch
@@ -293,6 +381,7 @@ def train(args: argparse.Namespace) -> dict[str, object]:
         "num_graphs": len(dataset),
         "num_nodes": dataset[0].num_nodes,
         "num_directed_edges": int(dataset[0].edge_index.shape[1]),
+        "data_parallel_device_ids": data_parallel_device_ids,
     }
 
 
@@ -306,6 +395,7 @@ def main() -> None:
         f"best_margin_acc {result['best_margin_accuracy']:.3f} | "
         f"graphs {result['num_graphs']} | nodes/graph {result['num_nodes']} | "
         f"directed_edges/graph {result['num_directed_edges']} | "
+        f"data_parallel_gpus {result['data_parallel_device_ids']} | "
         f"time {result['train_time']:.2f}s"
     )
 
