@@ -5,3 +5,6 @@ __pycache__/
 
 *.log
 core.*
+
+
+experimental/tasks/test_fashp_many_body_ring/sweep_results/*

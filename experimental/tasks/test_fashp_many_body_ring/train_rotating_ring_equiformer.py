@@ -61,11 +61,22 @@ MODEL_CONFIGS = {
 # Edit these lists when you want to run a batch of experiments. Sweep mode runs
 # every graph config against every model config and every lmax in lmax_values.
 RING_SWEEP_GRAPH_CONFIGS = [
+    {"name": "inner1_outer1", "ring_n_inner": 1, "ring_n_outer": 1},
+    {"name": "inner1_outer2", "ring_n_inner": 1, "ring_n_outer": 2},
+    {"name": "inner1_outer3", "ring_n_inner": 1, "ring_n_outer": 3},
     {"name": "inner1_outer4", "ring_n_inner": 1, "ring_n_outer": 4},
     {"name": "inner2_outer1", "ring_n_inner": 2, "ring_n_outer": 1},
     {"name": "inner2_outer2", "ring_n_inner": 2, "ring_n_outer": 2},
     {"name": "inner2_outer3", "ring_n_inner": 2, "ring_n_outer": 3},
     {"name": "inner2_outer4", "ring_n_inner": 2, "ring_n_outer": 4},
+    {"name": "inner3_outer1", "ring_n_inner": 3, "ring_n_outer": 1},
+    {"name": "inner3_outer2", "ring_n_inner": 3, "ring_n_outer": 2},
+    {"name": "inner3_outer3", "ring_n_inner": 3, "ring_n_outer": 3},
+    {"name": "inner3_outer4", "ring_n_inner": 3, "ring_n_outer": 4},
+    {"name": "inner4_outer1", "ring_n_inner": 4, "ring_n_outer": 1},
+    {"name": "inner4_outer2", "ring_n_inner": 4, "ring_n_outer": 2},
+    {"name": "inner4_outer3", "ring_n_inner": 4, "ring_n_outer": 3},
+    {"name": "inner4_outer4", "ring_n_inner": 4, "ring_n_outer": 4},
 ]
 
 
@@ -105,9 +116,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ring-n-inner", type=int, default=3)
     parser.add_argument("--ring-n-outer", type=int, default=3)
     parser.add_argument("--ring-inner-radius-min", type=float, default=1.0)
-    parser.add_argument("--ring-inner-radius-max", type=float, default=1.8)
-    parser.add_argument("--ring-outer-gap-min", type=float, default=0.8)
-    parser.add_argument("--ring-outer-gap-max", type=float, default=1.6)
+    parser.add_argument("--ring-inner-radius-max", type=float, default=1.0)
+    parser.add_argument("--ring-outer-gap-min", type=float, default=1.2)
+    parser.add_argument("--ring-outer-gap-max", type=float, default=1.2)
     parser.add_argument("--ring-outer-rotation-frac-min", type=float, default=0.0)
     parser.add_argument("--ring-outer-rotation-frac-max", type=float, default=0.45)
     parser.add_argument("--ring-outer-3d-rotation-deg", type=float, default=0.0)
