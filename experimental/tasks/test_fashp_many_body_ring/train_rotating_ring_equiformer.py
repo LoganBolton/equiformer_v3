@@ -40,6 +40,12 @@ os.environ.setdefault("MPLCONFIGDIR", str(TASK_DIR / ".matplotlib-cache"))
 os.chdir(TASK_DIR)
 
 from equiformer_v3_body_order_test import EquiformerV3BodyOrderTest
+from rotating_ring_experiment_utils import (
+    add_experiment_io_args,
+    make_result_record,
+    run_sweep,
+    write_result_json,
+)
 from rotating_ring.generate_data.rotating_ring_dataset import create_rotating_ring_dataset
 
 
@@ -52,8 +58,28 @@ MODEL_CONFIGS = {
 }
 
 
+# Edit these lists when you want to run a batch of experiments. Sweep mode runs
+# every graph config against every model config and every lmax in lmax_values.
+RING_SWEEP_GRAPH_CONFIGS = [
+    {"name": "inner1_outer4", "ring_n_inner": 1, "ring_n_outer": 4},
+    {"name": "inner2_outer1", "ring_n_inner": 2, "ring_n_outer": 1},
+    {"name": "inner2_outer2", "ring_n_inner": 2, "ring_n_outer": 2},
+    {"name": "inner2_outer3", "ring_n_inner": 2, "ring_n_outer": 3},
+    {"name": "inner2_outer4", "ring_n_inner": 2, "ring_n_outer": 4},
+]
+
+
+RING_SWEEP_MODEL_CONFIGS = [
+    {
+        "name": "sep_merge_gates2_swiglu_lmax2_3_4_5_6",
+        "model_config": "sep-merge_gates2_swiglu",
+        "lmax_values": [2, 3, 4, 5, 6],
+    },
+]
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
+    add_experiment_io_args(parser, TASK_DIR)
     parser.add_argument("--epochs", type=int, default=1000)
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--learning-rate", type=float, default=1e-4)
@@ -387,7 +413,24 @@ def train(args: argparse.Namespace) -> dict[str, object]:
 
 def main() -> None:
     args = parse_args()
+    if args.run_sweep:
+        run_sweep(
+            args=args,
+            graph_configs=RING_SWEEP_GRAPH_CONFIGS,
+            model_configs=RING_SWEEP_MODEL_CONFIGS,
+            train_script=Path(__file__).resolve(),
+            repo_root=REPO_ROOT,
+            cuda_available=torch.cuda.is_available(),
+            cuda_device_count=torch.cuda.device_count(),
+        )
+        return
+
     result = train(args)
+    result_record = make_result_record(args, result)
+    if args.results_json is not None:
+        write_result_json(args.results_json, result_record)
+        print(f"Wrote JSON result to {args.results_json}", flush=True)
+
     print(
         f"Done: epoch {result['epoch']} | loss {result['loss']:.6f} | "
         f"acc {result['accuracy']:.3f} | margin_acc {result['margin_accuracy']:.3f} | "

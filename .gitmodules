@@ -1,3 +1,4 @@
 [submodule "external/rotation-invariant-neural-networks"]
 	path = external/rotation-invariant-neural-networks
 	url = https://github.com/LoganBolton/rotation-invariant-neural-networks.git
+	branch = updated-ring-dataset
