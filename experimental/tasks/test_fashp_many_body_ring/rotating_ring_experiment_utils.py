@@ -243,24 +243,27 @@ def _build_sweep_experiments(
     for graph_config in graph_configs:
         for model_config in model_configs:
             lmax_values = model_config.get("lmax_values", [model_config.get("lmax", args.lmax)])
+            num_layers_values = model_config.get("num_layers_values", [model_config.get("num_layers", args.num_layers)])
             for lmax in lmax_values:
-                experiment_name = f"{graph_config['name']}__{model_config['name']}__lmax{lmax}"
-                safe_experiment_name = _sanitize_experiment_name(experiment_name)
-                command = [args.sweep_python, str(train_script)]
-                for arg_name, value in common_args.items():
-                    _append_cli_arg(command, arg_name, value)
-                for arg_name, value in _sweep_overrides(graph_config, model_config, lmax, safe_experiment_name).items():
-                    _append_cli_arg(command, arg_name, value)
+                for num_layers in num_layers_values:
+                    experiment_name = f"{graph_config['name']}__{model_config['name']}__lmax{lmax}__layers{num_layers}"
+                    safe_experiment_name = _sanitize_experiment_name(experiment_name)
+                    command = [args.sweep_python, str(train_script)]
+                    for arg_name, value in common_args.items():
+                        _append_cli_arg(command, arg_name, value)
+                    for arg_name, value in _sweep_overrides(graph_config, model_config, lmax, num_layers, safe_experiment_name).items():
+                        _append_cli_arg(command, arg_name, value)
 
-                experiments.append(
-                    {
-                        "name": safe_experiment_name,
-                        "graph_config": graph_config,
-                        "model_config": model_config,
-                        "lmax": lmax,
-                        "command": command,
-                    }
-                )
+                    experiments.append(
+                        {
+                            "name": safe_experiment_name,
+                            "graph_config": graph_config,
+                            "model_config": model_config,
+                            "lmax": lmax,
+                            "num_layers": num_layers,
+                            "command": command,
+                        }
+                    )
     return experiments
 
 
@@ -275,6 +278,7 @@ def _sweep_common_args(args: argparse.Namespace) -> dict[str, Any]:
             "ring_n_outer",
             "model_config",
             "lmax",
+            "num_layers",
             "use_gaunt_self_tensor_product",
         }
     )
@@ -285,6 +289,7 @@ def _sweep_overrides(
     graph_config: dict[str, Any],
     model_config: dict[str, Any],
     lmax: int,
+    num_layers: int,
     experiment_name: str,
 ) -> dict[str, Any]:
     overrides = {
@@ -292,6 +297,7 @@ def _sweep_overrides(
         "ring_n_outer": graph_config["ring_n_outer"],
         "model_config": model_config["model_config"],
         "lmax": lmax,
+        "num_layers": num_layers,
         "experiment_name": experiment_name,
         "device": "cuda:0",
         "gpu_ids": [0],
@@ -417,6 +423,7 @@ def _job_failure_record(
             "model": {
                 **job["experiment"]["model_config"],
                 "lmax": job["experiment"]["lmax"],
+                "num_layers": job["experiment"]["num_layers"],
             },
         },
     }

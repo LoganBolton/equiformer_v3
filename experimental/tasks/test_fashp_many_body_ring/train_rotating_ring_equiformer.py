@@ -61,30 +61,16 @@ MODEL_CONFIGS = {
 # Edit these lists when you want to run a batch of experiments. Sweep mode runs
 # every graph config against every model config and every lmax in lmax_values.
 RING_SWEEP_GRAPH_CONFIGS = [
-    {"name": "inner1_outer1", "ring_n_inner": 1, "ring_n_outer": 1},
-    {"name": "inner1_outer2", "ring_n_inner": 1, "ring_n_outer": 2},
-    {"name": "inner1_outer3", "ring_n_inner": 1, "ring_n_outer": 3},
-    {"name": "inner1_outer4", "ring_n_inner": 1, "ring_n_outer": 4},
-    {"name": "inner2_outer1", "ring_n_inner": 2, "ring_n_outer": 1},
-    {"name": "inner2_outer2", "ring_n_inner": 2, "ring_n_outer": 2},
-    {"name": "inner2_outer3", "ring_n_inner": 2, "ring_n_outer": 3},
-    {"name": "inner2_outer4", "ring_n_inner": 2, "ring_n_outer": 4},
-    {"name": "inner3_outer1", "ring_n_inner": 3, "ring_n_outer": 1},
-    {"name": "inner3_outer2", "ring_n_inner": 3, "ring_n_outer": 2},
-    {"name": "inner3_outer3", "ring_n_inner": 3, "ring_n_outer": 3},
-    {"name": "inner3_outer4", "ring_n_inner": 3, "ring_n_outer": 4},
-    {"name": "inner4_outer1", "ring_n_inner": 4, "ring_n_outer": 1},
-    {"name": "inner4_outer2", "ring_n_inner": 4, "ring_n_outer": 2},
     {"name": "inner4_outer3", "ring_n_inner": 4, "ring_n_outer": 3},
-    {"name": "inner4_outer4", "ring_n_inner": 4, "ring_n_outer": 4},
 ]
 
 
 RING_SWEEP_MODEL_CONFIGS = [
     {
-        "name": "sep_merge_gates2_swiglu_lmax2_3_4_5_6",
+        "name": "sanity_check_4in3out",
         "model_config": "sep-merge_gates2_swiglu",
-        "lmax_values": [2, 3, 4, 5, 6],
+        "lmax_values": [2, 3, 4],
+        "num_layers_values": [1, 2, 3, 5, 7], 
     },
 ]
 
@@ -94,7 +80,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--epochs", type=int, default=1000)
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--learning-rate", type=float, default=1e-4)
-    parser.add_argument("--batch-size", type=int, default=128)
+    parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--success-margin", type=float, default=0.1)
     parser.add_argument("--stop-at-accuracy", type=float, default=1.0)
     parser.add_argument("--print-freq", type=int, default=10)
@@ -111,7 +97,7 @@ def parse_args() -> argparse.Namespace:
         help="Disable graph DataParallel even when multiple CUDA devices are visible.",
     )
 
-    parser.add_argument("--ring-n-graphs", type=int, default=100)
+    parser.add_argument("--ring-n-graphs", type=int, default=2)
     parser.add_argument("--ring-seed", type=int, default=0)
     parser.add_argument("--ring-n-inner", type=int, default=3)
     parser.add_argument("--ring-n-outer", type=int, default=3)
