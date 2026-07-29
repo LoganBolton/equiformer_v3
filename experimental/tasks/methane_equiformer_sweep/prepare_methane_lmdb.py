@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Prepare the methane extxyz data as FairChem LMDBs for EquiformerV3."""
+"""Prepare the methane extxyz data as shared FairChem LMDBs for EquiformerV3."""
 
 from __future__ import annotations
 
@@ -27,6 +27,8 @@ from hippynn_splits import index_sha256, make_hippynn_splits
 HARTREE_TO_KCAL_MOL = 627.5096080305927
 HARTREE_PER_BOHR_TO_KCAL_MOL_PER_ANG = 51.42208619083232 * 23.060541945329334
 HIPHOP_ENERGY_MEAN = -25042.327220945674
+EXPECTED_METHANE_ATOMIC_NUMBERS = [6, 1, 1, 1, 1]
+ENERGY_PATTERN = re.compile(r"(?:^|\s)energy=([^\s]+)")
 
 
 def positive_int(value: str) -> int:
@@ -42,15 +44,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-root", type=Path, default=Path(__file__).resolve().parent / "data")
     parser.add_argument("--data-size", type=positive_int, default=1_000_000)
     parser.add_argument("--data-sizes", type=positive_int, nargs="+", default=None)
-    parser.add_argument("--test-set-size", type=positive_int, default=80_000)
-    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--external-test-size", type=positive_int, default=80_000)
+    parser.add_argument("--split-seed", type=int, default=42)
     parser.add_argument("--max-neighbors", type=int, default=4)
     parser.add_argument("--radius", type=float, default=10.3)
     parser.add_argument("--molecule-cell-size", type=float, default=32.0)
     parser.add_argument("--map-size-gb", type=int, default=512)
     parser.add_argument("--commit-interval", type=positive_int, default=4096)
+    parser.add_argument("--purpose", type=str, default="shared_equiformer_dataset")
     parser.add_argument("--overwrite", action="store_true")
     return parser.parse_args()
+
+
+def dataset_name(data_size: int, external_test_size: int, split_seed: int) -> str:
+    return f"methane_train{data_size}_test{external_test_size}_split{split_seed}"
 
 
 def main() -> None:
@@ -62,7 +69,7 @@ def main() -> None:
 
 
 def prepare_one_size(args: argparse.Namespace, data_size: int) -> None:
-    dataset_dir = args.output_root / f"methane_train{data_size}_test{args.test_set_size}_seed{args.seed}"
+    dataset_dir = args.output_root / dataset_name(data_size, args.external_test_size, args.split_seed)
     if dataset_dir.exists():
         if not args.overwrite:
             manifest = dataset_dir / "manifest.json"
@@ -74,18 +81,21 @@ def prepare_one_size(args: argparse.Namespace, data_size: int) -> None:
                 f"{dataset_dir} exists without completion metadata. Move it aside or use --overwrite."
             )
         shutil.rmtree(dataset_dir)
+
     build_dir = dataset_dir.with_name(f".{dataset_dir.name}.building-{uuid.uuid4().hex}")
     build_dir.mkdir(parents=True)
 
-    indices = make_hippynn_splits(data_size, args.seed, args.test_set_size)
-    train_count = len(indices["train"])
-    valid_count = len(indices["valid"])
-    heldout_count = len(indices["internal_test"])
+    indices = make_hippynn_splits(data_size, args.split_seed, args.external_test_size)
     split_counts = {
-        "train": train_count,
-        "val": valid_count,
-        "heldout": heldout_count,
-        "test": args.test_set_size,
+        "train": len(indices["train"]),
+        "val": len(indices["valid"]),
+        "heldout": len(indices["internal_test"]),
+        "test": args.external_test_size,
+    }
+    split_sids = {
+        "train": set(indices["train"].tolist()),
+        "val": set(indices["valid"].tolist()),
+        "heldout": set(indices["internal_test"].tolist()),
     }
 
     writers = {
@@ -94,25 +104,17 @@ def prepare_one_size(args: argparse.Namespace, data_size: int) -> None:
     }
     natoms = {split: [] for split in split_counts}
 
-    valid_original_indices = set(indices["valid"].tolist())
-    heldout_original_indices = set(indices["internal_test"].tolist())
-
+    total_frames_needed = data_size + args.external_test_size
     try:
-        total = data_size + args.test_set_size
         frames = iter_methane_extxyz(args.data_src)
-        for frame_index, atoms in enumerate(tqdm(frames, total=total, desc=f"Converting methane {data_size}")):
-            if frame_index >= total:
+        for frame_index, atoms in enumerate(
+            tqdm(frames, total=total_frames_needed, desc=f"Converting {dataset_dir.name}")
+        ):
+            if frame_index >= total_frames_needed:
                 break
-            split = split_for_index(frame_index, data_size, valid_original_indices, heldout_original_indices)
+            split = split_for_index(frame_index, data_size, split_sids)
             data = convert_methane_atoms(atoms, molecule_cell_size=args.molecule_cell_size)
-            if int(data.natoms) != 5:
-                raise RuntimeError(f"Source frame {frame_index} has {int(data.natoms)} atoms; expected methane (5).")
-            if sorted(data.atomic_numbers.tolist()) != [1, 1, 1, 1, 6]:
-                raise RuntimeError(f"Source frame {frame_index} does not have CH4 atomic numbers.")
-            if tuple(data.forces.shape) != (5, 3):
-                raise RuntimeError(f"Source frame {frame_index} forces have shape {tuple(data.forces.shape)}.")
-            if not torch.isfinite(data.pos).all() or not torch.isfinite(data.forces).all():
-                raise RuntimeError(f"Source frame {frame_index} has non-finite positions or forces.")
+            validate_unconverted_frame(data, frame_index)
             data.sid = frame_index
             data.fid = 0
             data.energy = torch.tensor(
@@ -120,8 +122,7 @@ def prepare_one_size(args: argparse.Namespace, data_size: int) -> None:
                 dtype=torch.float32,
             )
             data.forces = data.forces * HARTREE_PER_BOHR_TO_KCAL_MOL_PER_ANG
-            if not torch.isfinite(data.energy).all() or not torch.isfinite(data.forces).all():
-                raise RuntimeError(f"Source frame {frame_index} has non-finite converted labels.")
+            validate_converted_frame(data, frame_index, args.radius)
             writers[split].write(data)
             natoms[split].append(int(data.natoms))
     finally:
@@ -141,24 +142,30 @@ def prepare_one_size(args: argparse.Namespace, data_size: int) -> None:
         ).strip()
     except (OSError, subprocess.CalledProcessError):
         commit = None
+
     manifest = {
+        "dataset_name": dataset_dir.name,
+        "purpose": args.purpose,
         "source_trajectory": str(args.data_src.resolve()),
         "data_size": data_size,
-        "test_set_size": args.test_set_size,
+        "external_test_size": args.external_test_size,
+        "split_seed": args.split_seed,
+        "model_seed": None,
         "valid_fraction_of_full_pool": 0.1,
         "internal_test_fraction_of_full_pool": 0.1,
-        "seed": args.seed,
         "energy_units": "kcal/mol shifted by HIPHOP_ENERGY_MEAN",
         "force_units": "kcal/mol/Angstrom",
         "hiphop_energy_mean": HIPHOP_ENERGY_MEAN,
+        "energy_conversion_factor": HARTREE_TO_KCAL_MOL,
+        "force_conversion_factor": HARTREE_PER_BOHR_TO_KCAL_MOL_PER_ANG,
         "splits": split_counts,
         "index_sha256": {name: index_sha256(value) for name, value in indices.items()},
         "git_commit": commit,
         "generation_command": command,
-        "selection": "first data_size frames; external test is immediately following frames",
+        "selection": "first data_size frames define the development pool; the next external_test_size sequential frames define the external test set",
         "position_units": "Angstrom",
         "label_dtype": "float32",
-        "atomic_numbers": [1, 6],
+        "atomic_numbers": EXPECTED_METHANE_ATOMIC_NUMBERS,
         "atoms_per_frame": 5,
         "pbc": [False, False, False],
         "max_radius_angstrom": args.radius,
@@ -169,15 +176,45 @@ def prepare_one_size(args: argparse.Namespace, data_size: int) -> None:
     print(f"Wrote methane LMDB dataset to {dataset_dir}")
 
 
-def convert_methane_atoms(atoms, molecule_cell_size: float) -> Data:
+def validate_unconverted_frame(data: Data, frame_index: int) -> None:
+    atomic_numbers = data.atomic_numbers.tolist()
+    if int(data.natoms) != 5:
+        raise RuntimeError(f"Source frame {frame_index} has {int(data.natoms)} atoms; expected methane (5).")
+    if atomic_numbers != EXPECTED_METHANE_ATOMIC_NUMBERS:
+        raise RuntimeError(
+            f"Source frame {frame_index} atomic numbers/order {atomic_numbers} != {EXPECTED_METHANE_ATOMIC_NUMBERS}."
+        )
+    if tuple(data.forces.shape) != (5, 3):
+        raise RuntimeError(f"Source frame {frame_index} forces have shape {tuple(data.forces.shape)}.")
+    if torch.as_tensor(data.pbc, dtype=torch.bool).any():
+        raise RuntimeError(f"Source frame {frame_index} is periodic; methane export must be nonperiodic.")
+    if not torch.isfinite(data.pos).all() or not torch.isfinite(data.forces).all():
+        raise RuntimeError(f"Source frame {frame_index} has non-finite positions or forces.")
+
+
+def validate_converted_frame(data: Data, frame_index: int, radius: float) -> None:
+    if not torch.isfinite(data.energy).all() or not torch.isfinite(data.forces).all():
+        raise RuntimeError(f"Source frame {frame_index} has non-finite converted labels.")
+    pos = torch.as_tensor(data.pos, dtype=torch.float64)
+    distances = torch.cdist(pos, pos)
+    natoms = int(data.natoms)
+    mask = ~torch.eye(natoms, dtype=torch.bool)
+    directed_edges = int((distances[mask] < radius).sum().item())
+    if directed_edges != 20:
+        raise RuntimeError(
+            f"Source frame {frame_index} has {directed_edges} directed non-self edges within {radius} A; expected 20."
+        )
+
+
+def convert_methane_atoms(atoms: Atoms, molecule_cell_size: float) -> Data:
     atoms_copy = atoms.copy()
     if atoms_copy.cell.volume == 0.0:
         atoms_copy.center(vacuum=molecule_cell_size)
     cell = torch.tensor(np.asarray(atoms_copy.get_cell(complete=True)), dtype=torch.float32).view(1, 3, 3)
     positions = torch.tensor(np.asarray(atoms_copy.get_positions()), dtype=torch.float32)
-    atomic_numbers = torch.tensor(atoms_copy.get_atomic_numbers(), dtype=torch.uint8)
-    tags = torch.tensor(atoms_copy.get_tags(), dtype=torch.int)
-    fixed = torch.zeros(len(atoms_copy), dtype=torch.int)
+    atomic_numbers = torch.tensor(atoms_copy.get_atomic_numbers(), dtype=torch.int64)
+    tags = torch.tensor(atoms_copy.get_tags(), dtype=torch.int64)
+    fixed = torch.zeros(len(atoms_copy), dtype=torch.int64)
     for constraint in getattr(atoms_copy, "constraints", []):
         if isinstance(constraint, FixAtoms):
             fixed[constraint.index] = 1
@@ -195,9 +232,6 @@ def convert_methane_atoms(atoms, molecule_cell_size: float) -> Data:
     )
 
 
-ENERGY_PATTERN = re.compile(r"(?:^|\s)energy=([^\s]+)")
-
-
 def iter_methane_extxyz(path: Path):
     """Stream this fixed-size CH4 extxyz without ASE's full-file index scan."""
     with path.open("r", encoding="utf-8") as handle:
@@ -212,10 +246,12 @@ def iter_methane_extxyz(path: Path):
                 raise ValueError(f"Malformed atom count at source frame {frame_index}: {count_line!r}") from exc
             if count != 5:
                 raise ValueError(f"Source frame {frame_index} contains {count} atoms, expected 5")
+
             header = handle.readline()
             match = ENERGY_PATTERN.search(header)
             if match is None:
                 raise ValueError(f"Source frame {frame_index} header has no energy")
+
             symbols: list[str] = []
             positions: list[list[float]] = []
             forces: list[list[float]] = []
@@ -229,6 +265,7 @@ def iter_methane_extxyz(path: Path):
                 values = [float(value) for value in fields[1:]]
                 positions.append(values[:3])
                 forces.append(values[3:])
+
             atoms = Atoms(symbols=symbols, positions=positions, pbc=False)
             atoms.calc = SinglePointCalculator(
                 atoms,
@@ -239,19 +276,16 @@ def iter_methane_extxyz(path: Path):
             frame_index += 1
 
 
-def split_for_index(
-    frame_index: int,
-    data_size: int,
-    valid_original_indices: set[int],
-    heldout_original_indices: set[int],
-) -> str:
+def split_for_index(frame_index: int, data_size: int, split_sids: dict[str, set[int]]) -> str:
     if frame_index >= data_size:
         return "test"
-    if frame_index in heldout_original_indices:
+    if frame_index in split_sids["heldout"]:
         return "heldout"
-    if frame_index in valid_original_indices:
+    if frame_index in split_sids["val"]:
         return "val"
-    return "train"
+    if frame_index in split_sids["train"]:
+        return "train"
+    raise RuntimeError(f"Development-pool source frame {frame_index} was not assigned to any split")
 
 
 class LmdbWriter:
@@ -276,7 +310,7 @@ class LmdbWriter:
             self.txn = self.env.begin(write=True)
 
     def close(self) -> None:
-        self.txn.put("length".encode("ascii"), pickle.dumps(self.count, protocol=-1))
+        self.txn.put(b"length", pickle.dumps(self.count, protocol=-1))
         self.txn.commit()
         self.txn = None
         self.env.sync()

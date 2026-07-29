@@ -1,14 +1,13 @@
 # Methane baseline handoff
 
-Status as of 2026-07-29: split reproduction is implemented and verified, but
-the baseline is not yet ready for a full sweep.
+Status as of 2026-07-29: shared-split support is implemented, but the required GPU smoke run still must be executed on a compute node before launching the 1M sweep.
 
 ## Verified from executed HIPPYNN code
 
 - Entry point: `examples/methane_sweep/training/methane_configurations.py`.
 - Training pool is the first `data_size` sequential extxyz frames.
-- External test is the next `80_000` sequential frames.
-- `Database(seed=model_seed, test_size=0.1, valid_size=0.1)` selects internal
+- External test is the next sequential `external_test_size` frames.
+- `Database(seed=split_seed, test_size=0.1, valid_size=0.1)` selects internal
   test first with `torch.randperm`, removes it, then selects validation with
   fraction `0.1 / 0.9` using the same `torch.Generator`. Selected indices are
   sorted. Train is the sorted remainder.
@@ -24,63 +23,67 @@ the baseline is not yet ready for a full sweep.
 
 - `hippynn_splits.py`: reusable exact split construction and canonical hashes.
 - `verify_splits.py`: independent construction, ordered and set comparison.
-- Exporter now writes seed-specific directories, `split_indices.npz`, hashes,
-  provenance, source indices (`sid`), and nonperiodic samples. Its strict
-  fixed-record CH4 reader avoids ASE's 4.4 GB full-file index scan, and atomic
-  publication prevents interrupted builds from appearing complete.
-- Config generator now uses seed-specific data, safe 128/512 batches, one
-  evaluation/checkpoint interval per epoch, four neighbors, and run names that
-  include both `lmax` and `mmax`.
-- `diagnose_lmdb.py` validates geometry, atom/force shapes, PBC and source IDs.
-- `evaluate_predictions.py` computes explicit energy and flattened-component
-  force MAE, RMSE and R-squared with alignment/shape checks.
-- `assemble_predictions.py` parses Fair-Chem IDs and force chunk boundaries,
-  joins predictions to external LMDB targets by source `sid`, rejects missing,
-  duplicate, extra, or shape-mismatched records, and writes canonical
-  `predictions.npz`.
+- `prepare_methane_lmdb.py`: now distinguishes `split_seed` from `model_seed`,
+  writes one shared dataset per `(data_size, external_test_size, split_seed)`,
+  writes `split_indices.npz`, hashes, and manifests, and validates methane atom
+  order, nonperiodicity, finite converted labels, and 20 directed edges.
+- `generate_sweep.py`: now emits configs that point all model seeds to the same
+  shared dataset directory, keeps `split_seed` and `model_seed` separate, uses
+  batch/eval batch size `512/512`, AdamW betas `[0.9, 0.98]`, eps `1e-6`, and
+  warmup+cosine scheduling toward `lr_min_factor=0.01`.
+- `diagnose_lmdb.py`: validates geometry, atom ordering, force shape, PBC, and
+  expected directed-edge count.
+- `assemble_predictions.py`: joins Fair-Chem predictions to external LMDB
+  targets by original source `sid` and rejects missing, duplicate, extra, or
+  shape-mismatched records.
+- `evaluate_predictions.py`: computes explicit shared energy and flattened
+  componentwise force MAE, RMSE, and R-squared.
+- `run_smoke.slurm`: now targets the required 1k shared smoke dataset and writes
+  `predictions.npz`, `metrics.json`, and `run_manifest.json` under the model run.
+- `run_sweep.slurm`: consumes the shared-dataset config manifest and launches
+  only model-seed-specific runs.
 
-Seed-42, 100k verified hashes:
+## Exact smoke split counts
 
-- train: `f3698919c96ff93586067e9cbe41484e4dca69fbb0f9b24fc96f5c79c51decef`
-- valid: `8629cfd9ac8354b4f7bf7f274ecbecc46ca7c3c0ce901cda196f4c74cda9cffe`
-- internal test: `240ef7c3984b00fc1d11e573bff8a7c35148feb64b239368aa14b2c0b02fd28e`
-- external test: `aea4a4998328eca534782c713b83870fded8e7e501ee3dd931dbd3c303cca1ab`
+For `data_size=1000`, `external_test_size=1000`, `split_seed=42`:
 
-## Next actions, in order
+- train: `800`
+- validation: `100`
+- internal heldout: `100`
+- external test: `1000`
 
-1. Add unit tests around split edge cases and compare against an imported
-   HIPPYNN `Database` when its environment is active.
-2. Rebuild only the seed-42 100k dataset. Do not use existing unseeded LMDBs.
-3. Run `diagnose_lmdb.py` and verify every graph has five atoms and normally 20
-   directed non-self edges.
-4. Run `scripts/train_equiformer_v3_smoke.py --mode predict` with the generated
-   config and `--checkpoint .../best_checkpoint.pt`. Convert its
-   `<trainer>_predictions.npz` using `assemble_predictions.py`.
-5. Feed the aligned archive to `evaluate_predictions.py`; add
-   `run_manifest.json`.
-6. Run one GPU, seed 42, 100k, l3/m2, one layer, 1e-4, one epoch. Confirm finite
-   gradients/loss, validation, checkpoint, prediction, and index alignment.
-7. Only then generate seed-specific data for other seeds and launch the sweep.
+Smoke split hashes:
 
-The existing generated tracked configs still contain legacy settings until
-regenerated. Prefer a small generated smoke-config directory first. The SLURM
-launcher correctly assigns independent GPUs, waits for every child, maintains
-separate logs, and returns nonzero if any child fails; keep `MAX_PARALLEL=1`
-for the smoke test.
+- train: `aeb892041fdc95976406d3f63077e6e782f0101fb498d2ea7cbdbc991ce5f7d0`
+- valid: `1373cdcc6ed6907b7f77cc59a924eee4b729389c83a24848b957a0cc9c6067fb`
+- internal test: `59dbe918bcb2f4dedd44412f2a9a1eecaa7cc2417ca0623ab9c019e2dc5c9244`
+- external test: `17db61bf83c86a1b36aaa6abfdd2d54e82ddafcc59c08cc850984b3fa6ec82b1`
 
-The legacy unseeded 100k train LMDB was inspected only as a diagnostic. Its
-stored length is 5,653 rather than 80,000 and its samples have
-`pbc=[True, True, True]`; it is incomplete/invalid and must not be reused.
-Two inspected methane frames did have five atoms, `(5, 3)` forces, 20 directed
-non-self edges at 10.3 Angstrom, and finite values. The login-node environment
-also reports GLIBC incompatibility warnings for PyG extension libraries, so
-actual model smoke testing should run on the intended compute node.
+## Exact final shared dataset target
 
-An end-to-end 11-frame streaming conversion succeeded at about 183 frames/s.
-`prepare_data.slurm` now generates every configured data size separately for
-seeds 42, 1776, and 250; rebuilding requires the explicit `OVERWRITE=1` knob.
-`run_smoke.slurm` implements the complete one-GPU gate from split verification
-through best-checkpoint prediction, aligned shared metrics, and run manifest.
-Both `prepare_data.slurm` (general CPU partition) and `run_smoke.slurm`
-(Ampere constraint, explicitly `CUDA_VISIBLE_DEVICES=0`) pass `sbatch
---test-only` on this cluster. No jobs were submitted during validation.
+For `data_size=1000000`, `external_test_size=80000`, `split_seed=42`:
+
+```text
+data/methane_train1000000_test80000_split42/
+```
+
+All final model seeds `42`, `250`, and `1776` must use that exact dataset.
+
+## Remaining required execution steps
+
+1. Build the 1k shared smoke dataset.
+2. Verify `split_indices.npz` and inspect the four LMDBs.
+3. Run the one-GPU smoke train/predict/evaluate job with model seed `42`.
+4. Confirm finite training loss, validation, checkpoint, best-checkpoint
+   discovery, external prediction, explicit metrics, and manifest creation.
+5. Only then build the final 1M shared dataset.
+6. Generate final configs for `(lmax,mmax)=(3,2)` and `(4,2)` across model
+   seeds `42, 250, 1776`.
+7. Submit the final training runs.
+
+## Known limitation at handoff time
+
+No GPU is available in the current login-node environment, so batch-size-512 fit
+and the end-to-end smoke training/prediction workflow have not yet been executed
+here. Run `run_smoke.slurm` on the intended Ampere compute node before any 1M
+launch.

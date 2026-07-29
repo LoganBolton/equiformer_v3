@@ -18,16 +18,35 @@ from hippynn_splits import index_sha256, make_hippynn_splits  # noqa: E402
 class SplitTests(unittest.TestCase):
     def test_seed42_100k_known_hashes(self) -> None:
         splits = make_hippynn_splits(100_000, 42)
-        self.assertEqual({name: len(value) for name, value in splits.items()}, {
-            "train": 80_000,
-            "valid": 10_000,
-            "internal_test": 10_000,
-            "external_test": 80_000,
-        })
+        self.assertEqual(
+            {name: len(value) for name, value in splits.items()},
+            {
+                "train": 80_000,
+                "valid": 10_000,
+                "internal_test": 10_000,
+                "external_test": 80_000,
+            },
+        )
         self.assertEqual(index_sha256(splits["train"]), "f3698919c96ff93586067e9cbe41484e4dca69fbb0f9b24fc96f5c79c51decef")
         self.assertEqual(index_sha256(splits["valid"]), "8629cfd9ac8354b4f7bf7f274ecbecc46ca7c3c0ce901cda196f4c74cda9cffe")
         self.assertEqual(index_sha256(splits["internal_test"]), "240ef7c3984b00fc1d11e573bff8a7c35148feb64b239368aa14b2c0b02fd28e")
         self.assertEqual(index_sha256(splits["external_test"]), "aea4a4998328eca534782c713b83870fded8e7e501ee3dd931dbd3c303cca1ab")
+
+    def test_seed42_1k_known_hashes(self) -> None:
+        splits = make_hippynn_splits(1_000, 42, external_size=1_000)
+        self.assertEqual(
+            {name: len(value) for name, value in splits.items()},
+            {
+                "train": 800,
+                "valid": 100,
+                "internal_test": 100,
+                "external_test": 1000,
+            },
+        )
+        self.assertEqual(index_sha256(splits["train"]), "aeb892041fdc95976406d3f63077e6e782f0101fb498d2ea7cbdbc991ce5f7d0")
+        self.assertEqual(index_sha256(splits["valid"]), "1373cdcc6ed6907b7f77cc59a924eee4b729389c83a24848b957a0cc9c6067fb")
+        self.assertEqual(index_sha256(splits["internal_test"]), "59dbe918bcb2f4dedd44412f2a9a1eecaa7cc2417ca0623ab9c019e2dc5c9244")
+        self.assertEqual(index_sha256(splits["external_test"]), "17db61bf83c86a1b36aaa6abfdd2d54e82ddafcc59c08cc850984b3fa6ec82b1")
 
     def test_splits_are_sorted_disjoint_and_complete(self) -> None:
         splits = make_hippynn_splits(101, 7, external_size=3)

@@ -12,19 +12,19 @@ import torch
 from hippynn_splits import index_sha256, make_hippynn_splits
 
 
-def independent_hippynn_splits(data_size: int, seed: int, external_size: int) -> dict[str, np.ndarray]:
-    generator = torch.Generator().manual_seed(seed)
+def independent_hippynn_splits(data_size: int, split_seed: int, external_size: int) -> dict[str, np.ndarray]:
+    generator = torch.Generator().manual_seed(split_seed)
     pool = torch.arange(data_size, dtype=torch.int64)
-    n_test = int(0.1 * data_size)
-    chosen = pool[torch.randperm(pool.numel(), generator=generator)[:n_test]].sort().values
-    remaining = pool[~torch.isin(pool, chosen)]
+    n_internal_test = int(0.1 * data_size)
+    internal_test = pool[torch.randperm(pool.numel(), generator=generator)[:n_internal_test]].sort().values
+    remaining = pool[~torch.isin(pool, internal_test)]
     n_valid = int((0.1 / 0.9) * remaining.numel())
     valid = remaining[torch.randperm(remaining.numel(), generator=generator)[:n_valid]].sort().values
     train = remaining[~torch.isin(remaining, valid)].sort().values
     return {
         "train": train.numpy(),
         "valid": valid.numpy(),
-        "internal_test": chosen.numpy(),
+        "internal_test": internal_test.numpy(),
         "external_test": np.arange(data_size, data_size + external_size, dtype=np.int64),
     }
 
@@ -32,13 +32,13 @@ def independent_hippynn_splits(data_size: int, seed: int, external_size: int) ->
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data-size", type=int, required=True)
-    parser.add_argument("--seed", type=int, required=True)
-    parser.add_argument("--external-size", type=int, default=80_000)
+    parser.add_argument("--split-seed", type=int, required=True)
+    parser.add_argument("--external-test-size", type=int, default=80_000)
     parser.add_argument("--indices", type=Path)
     args = parser.parse_args()
 
-    expected = independent_hippynn_splits(args.data_size, args.seed, args.external_size)
-    actual = make_hippynn_splits(args.data_size, args.seed, args.external_size)
+    expected = independent_hippynn_splits(args.data_size, args.split_seed, args.external_test_size)
+    actual = make_hippynn_splits(args.data_size, args.split_seed, args.external_test_size)
     if args.indices:
         with np.load(args.indices) as saved:
             actual = {name: saved[name] for name in expected}

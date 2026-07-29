@@ -20,7 +20,7 @@
 SCRIPT_DIR="${SLURM_SUBMIT_DIR:-$(pwd)}"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 TRAINING_SCRIPT="$PROJECT_ROOT/scripts/train_equiformer_v3_smoke.py"
-MANIFEST="$SCRIPT_DIR/configs/sweep_manifest.json"
+MANIFEST="${MANIFEST:-$SCRIPT_DIR/configs/sweep_manifest.json}"
 CONDA_ENV="${CONDA_ENV:-equiformer_v3}"
 MAX_PARALLEL="${MAX_PARALLEL:-4}"
 CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-5000}"
@@ -183,7 +183,7 @@ PY
         --seed "$(python - "$TASK_JSON" <<'PY'
 import json
 import sys
-print(json.loads(sys.argv[1])["seed"])
+print(json.loads(sys.argv[1])["model_seed"])
 PY
 )" \
         --optim.checkpoint_every="$CHECKPOINT_EVERY" \

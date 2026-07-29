@@ -6,142 +6,208 @@ This directory mirrors the HIP-HOP methane sweep at:
 
 It runs EquiformerV3 on the same methane frames, with:
 
-- seeds: `42, 1776, 250`
+- split seed: `42`
+- model seeds: `42, 250, 1776`
 - `lmax`: `3, 4`
+- `mmax`: `2`
 - `num_layers`: `1`
-- data sizes: configurable grid, default `100000, 1000000`
-- test size: `80000`
-- default train/eval batch size: `128/512`
-- learning-rate sweep: default `0.00005, 0.0001, 0.0002, 0.0004`
+- data sizes: smoke `1000`, final `1000000`
+- external test sizes: smoke `1000`, final `80000`
+- fixed train/eval batch size: `512/512`
+- learning rate: `1e-4`
+
+## Methodology
+
+A single train/validation/test split generated with split seed 42 was used for every run. Model seeds 42, 250, and 1776 changed only model initialization and training randomness.
+
+EquiformerV3 used a fixed batch size of 512 with AdamW and warmup followed by cosine learning-rate decay from 1e-4 toward 1e-6. HIP-HOP used adaptive batch-size increases followed by plateau-based learning-rate reductions.
 
 ## Data
 
 Download and unpack `methane.extxyz` from Materials Cloud, as in the HIP-HOP example:
 
 ```bash
-mkdir -p datasets
-# place methane.extxyz at datasets/methane.extxyz
+mkdir -p experimental/datasets
+# place methane.extxyz at experimental/datasets/methane.extxyz
 ```
 
-The prep script reads the first `data_size + test_set_size` frames. It applies the same unit conversion as the HIP-HOP script:
+The prep script reads the first `data_size + external_test_size` frames. It applies the same unit conversion as the HIP-HOP script:
 
-- energy: Hartree to kcal/mol, then subtracts `-25042.327220945674`
+- energy: Hartree to kcal/mol, then subtract `-25042.327220945674`
 - forces: Hartree/Bohr to kcal/mol/Angstrom
 
-## Prepare LMDBs
+## 1k smoke dataset
+
+Generate the shared smoke dataset:
 
 ```bash
 python experimental/tasks/methane_equiformer_sweep/prepare_methane_lmdb.py \
   --data-src experimental/datasets/methane.extxyz \
   --output-root experimental/tasks/methane_equiformer_sweep/data \
-  --data-sizes 100000 1000000 \
-  --test-set-size 80000 \
-  --seed 42
+  --data-size 1000 \
+  --external-test-size 1000 \
+  --split-seed 42 \
+  --purpose technical_smoke_test
 ```
 
-The first `data_size` frames are split with HIPPYNN's exact two-call
-`torch.randperm` algorithm. Internal test is selected first, validation second,
-and memberships are sorted. The next `80000` sequential frames are external
-test. Because HIPPYNN uses the model seed as its database seed, generate one
-directory per seed. Each directory contains `split_indices.npz` and a manifest
-with index hashes.
+Expected counts:
 
-Verify before training:
+- train: `800`
+- validation: `100`
+- internal heldout: `100`
+- external test: `1000`
+
+Dataset directory:
+
+```text
+experimental/tasks/methane_equiformer_sweep/data/methane_train1000_test1000_split42/
+```
+
+Required contents:
+
+```text
+train/data.lmdb
+val/data.lmdb
+heldout/data.lmdb
+test/data.lmdb
+split_indices.npz
+manifest.json
+```
+
+Verify the saved split indices and LMDBs:
 
 ```bash
 python experimental/tasks/methane_equiformer_sweep/verify_splits.py \
-  --data-size 100000 --seed 42 \
-  --indices experimental/tasks/methane_equiformer_sweep/data/methane_train100000_test80000_seed42/split_indices.npz
-```
+  --data-size 1000 --external-test-size 1000 --split-seed 42 \
+  --indices experimental/tasks/methane_equiformer_sweep/data/methane_train1000_test1000_split42/split_indices.npz
 
-Inspect rebuilt LMDB samples:
-
-```bash
 python experimental/tasks/methane_equiformer_sweep/diagnose_lmdb.py \
-  experimental/tasks/methane_equiformer_sweep/data/methane_train100000_test80000_seed42/train/data.lmdb
+  experimental/tasks/methane_equiformer_sweep/data/methane_train1000_test1000_split42/train/data.lmdb \
+  --expected-count 800 \
+  --manifest experimental/tasks/methane_equiformer_sweep/data/methane_train1000_test1000_split42/manifest.json
 ```
 
-Compute shared metrics after producing the required aligned prediction archive:
-
-```bash
-python experimental/tasks/methane_equiformer_sweep/evaluate_predictions.py \
-  path/to/predictions.npz --output path/to/metrics.json
-```
-
-Convert Fair-Chem's raw prediction archive into that aligned archive:
-
-```bash
-python experimental/tasks/methane_equiformer_sweep/assemble_predictions.py \
-  runs/<name>/results/<trainer>_predictions.npz \
-  data/methane_train100000_test80000_seed42/test/data.lmdb \
-  --output runs/<name>/predictions.npz
-```
-
-Explicit prediction uses the repository entry point with `--mode predict`,
-the same generated config, and `--checkpoint path/to/best_checkpoint.pt`.
-
-Run fast regression checks with:
-
-```bash
-python -m unittest experimental/tasks/methane_equiformer_sweep/test_methane_tools.py -v
-```
-
-The archive must contain source indices, scalar target/predicted energies, and
-target/predicted forces shaped `(frames, atoms, 3)`. Force metrics flatten all
-atom Cartesian components and are therefore componentwise, not vector-norm
-`l2mae`.
-
-Existing unseeded LMDB directories were produced by the old NumPy/PBC exporter
-and must not be used for comparison runs.
-
-## Generate Configs
-
-```bash
-python experimental/tasks/methane_equiformer_sweep/generate_sweep.py
-```
-
-Use `--data-sizes` and `--learning-rates` to change the grid.
-
-For the required one-run smoke config:
+## Smoke config generation
 
 ```bash
 python experimental/tasks/methane_equiformer_sweep/generate_sweep.py \
-  --seeds 42 --lmax-values 3 --data-sizes 100000 \
-  --learning-rates 1e-4 --epochs 1 --batch-size 128 --eval-batch-size 512 \
-  --output-dir /tmp/methane_smoke_config
+  --output-dir experimental/tasks/methane_equiformer_sweep/generated/smoke \
+  --data-root experimental/tasks/methane_equiformer_sweep/data \
+  --run-dir experimental/tasks/methane_equiformer_sweep/runs/smoke \
+  --model-seeds 42 \
+  --split-seed 42 \
+  --lmax-values 3 \
+  --data-size 1000 \
+  --external-test-size 1000 \
+  --learning-rates 1e-4 \
+  --epochs 1 \
+  --batch-size 512 \
+  --eval-batch-size 512
 ```
 
-Important remaining work: add best-checkpoint external prediction and its run
-manifest. Fair-Chem's built-in force loss/metric is not yet documented as
-identical to HIPPYNN's componentwise definitions.
-Do not launch the full sweep until the rebuilt seed-specific dataset and a
-single-GPU smoke run pass.
+## Smoke train / predict / evaluate
 
-## Run on Slurm
+Train:
 
-Run the required one-GPU gate first:
+```bash
+python scripts/train_equiformer_v3_smoke.py \
+  --mode train \
+  --config-yml experimental/tasks/methane_equiformer_sweep/generated/smoke/methane_eqv3_l3_m2_data1000_test1000_split42_lr1em04_seed42.yml \
+  --identifier methane_eqv3_l3_m2_data1000_test1000_split42_lr1em04_seed42 \
+  --timestamp-id methane_eqv3_l3_m2_data1000_test1000_split42_lr1em04_seed42 \
+  --run-dir experimental/tasks/methane_equiformer_sweep/runs/smoke/methane_train1000_test1000_split42/seed42/l3_m2_lr1em04 \
+  --seed 42
+```
+
+Predict from the best checkpoint:
+
+```bash
+python scripts/train_equiformer_v3_smoke.py \
+  --mode predict \
+  --config-yml experimental/tasks/methane_equiformer_sweep/generated/smoke/methane_eqv3_l3_m2_data1000_test1000_split42_lr1em04_seed42.yml \
+  --identifier methane_eqv3_l3_m2_data1000_test1000_split42_lr1em04_seed42 \
+  --timestamp-id methane_eqv3_l3_m2_data1000_test1000_split42_lr1em04_seed42 \
+  --run-dir experimental/tasks/methane_equiformer_sweep/runs/smoke/methane_train1000_test1000_split42/predict \
+  --seed 42 \
+  --checkpoint experimental/tasks/methane_equiformer_sweep/runs/smoke/methane_train1000_test1000_split42/seed42/l3_m2_lr1em04/checkpoints/methane_eqv3_l3_m2_data1000_test1000_split42_lr1em04_seed42/best_checkpoint.pt
+```
+
+Assemble aligned predictions:
+
+```bash
+python experimental/tasks/methane_equiformer_sweep/assemble_predictions.py \
+  experimental/tasks/methane_equiformer_sweep/runs/smoke/methane_train1000_test1000_split42/predict/results/methane_eqv3_l3_m2_data1000_test1000_split42_lr1em04_seed42/<trainer>_predictions.npz \
+  experimental/tasks/methane_equiformer_sweep/data/methane_train1000_test1000_split42/test/data.lmdb \
+  --output experimental/tasks/methane_equiformer_sweep/runs/smoke/methane_train1000_test1000_split42/seed42/l3_m2_lr1em04/predictions.npz
+```
+
+Evaluate explicit shared metrics:
+
+```bash
+python experimental/tasks/methane_equiformer_sweep/evaluate_predictions.py \
+  experimental/tasks/methane_equiformer_sweep/runs/smoke/methane_train1000_test1000_split42/seed42/l3_m2_lr1em04/predictions.npz \
+  --output experimental/tasks/methane_equiformer_sweep/runs/smoke/methane_train1000_test1000_split42/seed42/l3_m2_lr1em04/metrics.json
+```
+
+Or run the full smoke gate with Slurm:
 
 ```bash
 cd experimental/tasks/methane_equiformer_sweep
 sbatch run_smoke.slurm
 ```
 
-This verifies split hashes and LMDB diagnostics, generates one seed-42 l3/m2
-configuration, trains, predicts from `best_checkpoint.pt`, aligns predictions
-to external targets, and writes `predictions.npz`, `metrics.json`, and
-`run_manifest.json`. It exits on the first failed stage.
+## Final shared 1M dataset
+
+Generate the one shared final dataset only once:
+
+```bash
+python experimental/tasks/methane_equiformer_sweep/prepare_methane_lmdb.py \
+  --data-src experimental/datasets/methane.extxyz \
+  --output-root experimental/tasks/methane_equiformer_sweep/data \
+  --data-size 1000000 \
+  --external-test-size 80000 \
+  --split-seed 42 \
+  --purpose shared_equiformer_dataset
+```
+
+This writes:
+
+```text
+experimental/tasks/methane_equiformer_sweep/data/methane_train1000000_test80000_split42/
+```
+
+Do not generate separate datasets per model seed.
+
+## Final config generation
+
+Generate all final configs against the shared dataset:
+
+```bash
+python experimental/tasks/methane_equiformer_sweep/generate_sweep.py \
+  --output-dir experimental/tasks/methane_equiformer_sweep/configs \
+  --data-root experimental/tasks/methane_equiformer_sweep/data \
+  --run-dir experimental/tasks/methane_equiformer_sweep/runs/final \
+  --model-seeds 42 250 1776 \
+  --split-seed 42 \
+  --lmax-values 3 4 \
+  --data-size 1000000 \
+  --external-test-size 80000 \
+  --learning-rates 1e-4 \
+  --batch-size 512 \
+  --eval-batch-size 512
+```
+
+## Final sweep submission
+
+After the 1k smoke pipeline completes successfully end to end:
 
 ```bash
 cd experimental/tasks/methane_equiformer_sweep
 sbatch run_sweep.slurm
 ```
 
-The Slurm script follows the same local-worker pattern as the HIP-HOP sweep: one parent Slurm job, one child process per visible GPU, and checkpoint resume on requeue.
-
-Cluster knobs can be overridden at submit time:
+## Regression checks
 
 ```bash
-MAX_PARALLEL=4 WANDB_MODE=offline CHECKPOINT_EVERY=5000 sbatch run_sweep.slurm
+python -m unittest experimental/tasks/methane_equiformer_sweep/test_methane_tools.py -v
 ```
-
-Edit the `#SBATCH` header only if your cluster partition, constraint, memory, or QoS needs to change.
