@@ -10,3 +10,6 @@ core.*
 experimental/tasks/test_fashp_many_body_ring/sweep_results/*
 experimental/datasets/methane.extxyz
 experimental/tasks/methane_equiformer_sweep/data/
+experimental/tasks/methane_equiformer_sweep/generated/
+experimental/tasks/methane_equiformer_sweep/runs/
+experimental/tasks/methane_equiformer_sweep/logs/

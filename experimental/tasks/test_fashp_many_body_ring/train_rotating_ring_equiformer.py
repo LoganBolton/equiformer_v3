@@ -46,7 +46,10 @@ from rotating_ring_experiment_utils import (
     run_sweep,
     write_result_json,
 )
-from rotating_ring.generate_data.rotating_ring_dataset import create_rotating_ring_dataset
+from rotating_ring.generate_data.rotating_ring_dataset import (
+    create_rotating_ring_dataset,
+    create_z_phase_ring_sample_dataset,
+)
 
 
 MODEL_CONFIGS = {
@@ -61,16 +64,32 @@ MODEL_CONFIGS = {
 # Edit these lists when you want to run a batch of experiments. Sweep mode runs
 # every graph config against every model config and every lmax in lmax_values.
 RING_SWEEP_GRAPH_CONFIGS = [
+    {"name": "inner1_outer1", "ring_n_inner": 1, "ring_n_outer": 1},
+    {"name": "inner1_outer2", "ring_n_inner": 1, "ring_n_outer": 2},
+    {"name": "inner1_outer3", "ring_n_inner": 1, "ring_n_outer": 3},
+    {"name": "inner1_outer4", "ring_n_inner": 1, "ring_n_outer": 4},
+    {"name": "inner2_outer1", "ring_n_inner": 2, "ring_n_outer": 1},
+    {"name": "inner2_outer2", "ring_n_inner": 2, "ring_n_outer": 2},
+    {"name": "inner2_outer3", "ring_n_inner": 2, "ring_n_outer": 3},
+    {"name": "inner2_outer4", "ring_n_inner": 2, "ring_n_outer": 4},
+    {"name": "inner3_outer1", "ring_n_inner": 3, "ring_n_outer": 1},
+    {"name": "inner3_outer2", "ring_n_inner": 3, "ring_n_outer": 2},
+    {"name": "inner3_outer3", "ring_n_inner": 3, "ring_n_outer": 3},
+    {"name": "inner3_outer4", "ring_n_inner": 3, "ring_n_outer": 4},
+    {"name": "inner4_outer1", "ring_n_inner": 4, "ring_n_outer": 1},
+    {"name": "inner4_outer2", "ring_n_inner": 4, "ring_n_outer": 2},
     {"name": "inner4_outer3", "ring_n_inner": 4, "ring_n_outer": 3},
+    {"name": "inner4_outer4", "ring_n_inner": 4, "ring_n_outer": 4},
 ]
 
 
 RING_SWEEP_MODEL_CONFIGS = [
     {
-        "name": "sanity_check_4in3out",
+        "name": "z_rotation_dynamic_lmax_dynamic_numlayers",
         "model_config": "sep-merge_gates2_swiglu",
         "lmax_values": [2, 3, 4],
-        "num_layers_values": [1, 2, 3, 5, 7], 
+        "num_layers_values": [1, 2],
+        "seed_values": [4, 5, 6, 7, 8, 9, 10],
     },
 ]
 
@@ -111,6 +130,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ring-outer-3d-axis-deg", type=float, default=0.0)
     parser.add_argument("--ring-global-rotation-frac-min", type=float, default=0.0)
     parser.add_argument("--ring-global-rotation-frac-max", type=float, default=0.0)
+    parser.add_argument("--ring-z-phase-sample", action="store_true")
+    parser.add_argument("--ring-z-phase-radius", type=float, default=1.0)
+    parser.add_argument("--ring-z-phase-far-inner-rotation-deg", type=float, default=15.0)
     parser.add_argument("--ring-random-parameters", action="store_true")
     parser.add_argument("--ring-shuffle", action="store_true")
     parser.add_argument("--add-inner-ring-edges", action="store_true")
@@ -141,28 +163,40 @@ def create_ring_pyg_dataset(args: argparse.Namespace) -> list[Data]:
     if args.ring_n_graphs <= 0:
         raise ValueError(f"--ring-n-graphs must be positive, got {args.ring_n_graphs}.")
 
-    envs = create_rotating_ring_dataset(
-        n_graphs=args.ring_n_graphs,
-        seed=args.ring_seed,
-        n_inner=args.ring_n_inner,
-        n_outer=args.ring_n_outer,
-        inner_radius_range=(args.ring_inner_radius_min, args.ring_inner_radius_max),
-        outer_gap_range=(args.ring_outer_gap_min, args.ring_outer_gap_max),
-        outer_rotation_fraction_range=(
-            args.ring_outer_rotation_frac_min,
-            args.ring_outer_rotation_frac_max,
-        ),
-        outer_3d_rotation_range=(0.0, args.ring_outer_3d_rotation_deg * pi / 180.0),
-        outer_3d_axis_angle=args.ring_outer_3d_axis_deg * pi / 180.0,
-        global_rotation_fraction_range=(
-            args.ring_global_rotation_frac_min,
-            args.ring_global_rotation_frac_max,
-        ),
-        smooth_order=not args.ring_random_parameters,
-        shuffle=args.ring_shuffle,
-        add_inner_ring_edges=args.add_inner_ring_edges,
-        add_outer_ring_edges=args.add_outer_ring_edges,
-    )
+    if args.ring_z_phase_sample:
+        if args.ring_n_graphs != 2:
+            raise ValueError("--ring-z-phase-sample requires --ring-n-graphs 2.")
+        envs = create_z_phase_ring_sample_dataset(
+            radius=args.ring_z_phase_radius,
+            far_inner_rotation_degrees=args.ring_z_phase_far_inner_rotation_deg,
+            n_inner=args.ring_n_inner,
+            n_outer=args.ring_n_outer,
+            add_inner_ring_edges=args.add_inner_ring_edges,
+            add_outer_ring_edges=args.add_outer_ring_edges,
+        )
+    else:
+        envs = create_rotating_ring_dataset(
+            n_graphs=args.ring_n_graphs,
+            seed=args.ring_seed,
+            n_inner=args.ring_n_inner,
+            n_outer=args.ring_n_outer,
+            inner_radius_range=(args.ring_inner_radius_min, args.ring_inner_radius_max),
+            outer_gap_range=(args.ring_outer_gap_min, args.ring_outer_gap_max),
+            outer_rotation_fraction_range=(
+                args.ring_outer_rotation_frac_min,
+                args.ring_outer_rotation_frac_max,
+            ),
+            outer_3d_rotation_range=(0.0, args.ring_outer_3d_rotation_deg * pi / 180.0),
+            outer_3d_axis_angle=args.ring_outer_3d_axis_deg * pi / 180.0,
+            global_rotation_fraction_range=(
+                args.ring_global_rotation_frac_min,
+                args.ring_global_rotation_frac_max,
+            ),
+            smooth_order=not args.ring_random_parameters,
+            shuffle=args.ring_shuffle,
+            add_inner_ring_edges=args.add_inner_ring_edges,
+            add_outer_ring_edges=args.add_outer_ring_edges,
+        )
 
     dataset = []
     for env in envs:

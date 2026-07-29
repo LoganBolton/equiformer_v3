@@ -25,8 +25,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--learning-rates", type=float, nargs="+", default=[5e-5, 1e-4, 2e-4, 4e-4])
     parser.add_argument("--test-set-size", type=int, default=80_000)
     parser.add_argument("--epochs", type=int, default=10_000)
-    parser.add_argument("--batch-size", type=int, default=65_536)
-    parser.add_argument("--eval-batch-size", type=int, default=65_536)
+    parser.add_argument("--batch-size", type=int, default=128)
+    parser.add_argument("--eval-batch-size", type=int, default=512)
     parser.add_argument("--num-workers", type=int, default=0)
     return parser.parse_args()
 
@@ -43,9 +43,10 @@ def main() -> None:
         args.data_sizes,
         args.learning_rates,
     ):
-        name = f"methane_eqv3_l{lmax}_data{data_size}_lr{format_lr(lr)}_seed{seed}"
+        mmax = min(2, lmax)
+        name = f"methane_eqv3_l{lmax}_m{mmax}_data{data_size}_lr{format_lr(lr)}_seed{seed}"
         config_path = args.output_dir / f"{name}.yml"
-        dataset_dir = args.data_root / f"methane_train{data_size}_test{args.test_set_size}"
+        dataset_dir = args.data_root / f"methane_train{data_size}_test{args.test_set_size}_seed{seed}"
         config = build_config(args, name, dataset_dir, seed, lmax, lr)
         config_path.write_text(json.dumps(config, indent=2, sort_keys=False) + "\n", encoding="utf-8")
         configs.append(
@@ -108,13 +109,13 @@ def build_config(
         },
         "model": {
             "name": "equiformer_v3",
-            "use_pbc": True,
+            "use_pbc": False,
             "use_pbc_single": False,
             "otf_graph": True,
             "regress_forces": True,
             "regress_stress": False,
             "direct_prediction": False,
-            "max_neighbors": 128,
+            "max_neighbors": 4,
             "max_radius": 10.3,
             "num_radial_basis": 20,
             "max_num_elements": 128,
@@ -150,7 +151,7 @@ def build_config(
             "ffn_drop": 0.0,
             "gradient_checkpointing_block_list": [0],
             "enforce_max_neighbors_strictly": True,
-            "avg_num_nodes": 1,
+            "avg_num_nodes": 5,
         },
         "optim": {
             "batch_size": args.batch_size,
@@ -172,8 +173,8 @@ def build_config(
             "max_epochs": args.epochs,
             "clip_grad_norm": 100,
             "ema_decay": None,
-            "eval_every": 5000,
-            "checkpoint_every": 5000,
+            "eval_every": max(1, (int(0.8 * dataset_size(dataset_dir)) + args.batch_size - 1) // args.batch_size),
+            "checkpoint_every": max(1, (int(0.8 * dataset_size(dataset_dir)) + args.batch_size - 1) // args.batch_size),
             "use_compile": False,
             "use_denoising_pos": False,
             "denoising_pos_coefficient": 10,
@@ -198,6 +199,11 @@ def dataset_config(src: Path) -> dict[str, Any]:
             }
         },
     }
+
+
+def dataset_size(dataset_dir: Path) -> int:
+    """Extract the training-pool size from methane_train<N>_test<M>_seed<S>."""
+    return int(dataset_dir.name.split("_test", 1)[0].removeprefix("methane_train"))
 
 
 def format_lr(lr: float) -> str:

@@ -20,6 +20,7 @@ SWEEP_ONLY_ARG_NAMES = {
     "sweep_results_dir",
     "sweep_python",
     "sweep_dry_run",
+    "sweep_resume",
     "results_json",
     "experiment_name",
 }
@@ -54,6 +55,11 @@ def add_experiment_io_args(parser: argparse.ArgumentParser, task_dir: Path) -> N
         "--sweep-dry-run",
         action="store_true",
         help="Print sweep commands without running them.",
+    )
+    parser.add_argument(
+        "--sweep-resume",
+        action="store_true",
+        help="Skip experiments with valid existing result JSON files and run only missing experiments.",
     )
     parser.add_argument(
         "--results-json",
@@ -117,19 +123,24 @@ def run_sweep(
     gpu_ids = _resolve_sweep_gpu_ids(args, cuda_available, cuda_device_count)
     experiments = _build_sweep_experiments(args, graph_configs, model_configs, train_script)
     args.sweep_results_dir.mkdir(parents=True, exist_ok=True)
+    indexed_experiments = list(enumerate(experiments, start=1))
     result_records: list[dict[str, Any]] = []
+    if args.sweep_resume:
+        indexed_experiments, result_records = _resume_partition(args, indexed_experiments)
 
     print(
-        f"Launching {len(experiments)} experiments on GPUs {gpu_ids}; "
+        f"Launching {len(indexed_experiments)} experiments on GPUs {gpu_ids}; "
         f"logs: {args.sweep_results_dir}",
         flush=True,
     )
+    if args.sweep_resume:
+        print(f"Resume: keeping {len(result_records)} completed experiments.", flush=True)
 
     if args.sweep_dry_run:
-        _print_sweep_dry_run(args, experiments, gpu_ids)
+        _print_sweep_dry_run(args, indexed_experiments, gpu_ids)
         return
 
-    queue = deque(enumerate(experiments, start=1))
+    queue = deque(indexed_experiments)
     running: dict[int, dict[str, Any]] = {}
     failures = []
 
@@ -152,6 +163,27 @@ def run_sweep(
         f"{args.sweep_results_dir / 'sweep_results.csv'}",
         flush=True,
     )
+
+
+def _resume_partition(
+    args: argparse.Namespace,
+    indexed_experiments: list[tuple[int, dict[str, Any]]],
+) -> tuple[list[tuple[int, dict[str, Any]]], list[dict[str, Any]]]:
+    pending = []
+    completed = []
+    for index, experiment in indexed_experiments:
+        result_path = args.sweep_results_dir / f"{index:03d}_{experiment['name']}.result.json"
+        try:
+            record = json.loads(result_path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            pending.append((index, experiment))
+            continue
+        if record.get("status") != "ok" or record.get("experiment_name") != experiment["name"]:
+            pending.append((index, experiment))
+            continue
+        record["result_path"] = str(result_path)
+        completed.append(record)
+    return pending, completed
 
 
 def _result_config(args: argparse.Namespace) -> dict[str, Any]:
@@ -179,6 +211,9 @@ def _result_config(args: argparse.Namespace) -> dict[str, Any]:
             "ring_outer_3d_axis_deg": args.ring_outer_3d_axis_deg,
             "ring_global_rotation_frac_min": args.ring_global_rotation_frac_min,
             "ring_global_rotation_frac_max": args.ring_global_rotation_frac_max,
+            "ring_z_phase_sample": args.ring_z_phase_sample,
+            "ring_z_phase_radius": args.ring_z_phase_radius,
+            "ring_z_phase_far_inner_rotation_deg": args.ring_z_phase_far_inner_rotation_deg,
             "ring_random_parameters": args.ring_random_parameters,
             "ring_shuffle": args.ring_shuffle,
             "add_inner_ring_edges": args.add_inner_ring_edges,
@@ -244,26 +279,34 @@ def _build_sweep_experiments(
         for model_config in model_configs:
             lmax_values = model_config.get("lmax_values", [model_config.get("lmax", args.lmax)])
             num_layers_values = model_config.get("num_layers_values", [model_config.get("num_layers", args.num_layers)])
+            seed_values = model_config.get("seed_values", [args.seed])
             for lmax in lmax_values:
                 for num_layers in num_layers_values:
-                    experiment_name = f"{graph_config['name']}__{model_config['name']}__lmax{lmax}__layers{num_layers}"
-                    safe_experiment_name = _sanitize_experiment_name(experiment_name)
-                    command = [args.sweep_python, str(train_script)]
-                    for arg_name, value in common_args.items():
-                        _append_cli_arg(command, arg_name, value)
-                    for arg_name, value in _sweep_overrides(graph_config, model_config, lmax, num_layers, safe_experiment_name).items():
-                        _append_cli_arg(command, arg_name, value)
+                    for seed in seed_values:
+                        experiment_name = (
+                            f"{graph_config['name']}__{model_config['name']}__"
+                            f"lmax{lmax}__layers{num_layers}__seed{seed}"
+                        )
+                        safe_experiment_name = _sanitize_experiment_name(experiment_name)
+                        command = [args.sweep_python, str(train_script)]
+                        for arg_name, value in common_args.items():
+                            _append_cli_arg(command, arg_name, value)
+                        for arg_name, value in _sweep_overrides(
+                            graph_config, model_config, lmax, num_layers, seed, safe_experiment_name
+                        ).items():
+                            _append_cli_arg(command, arg_name, value)
 
-                    experiments.append(
-                        {
-                            "name": safe_experiment_name,
-                            "graph_config": graph_config,
-                            "model_config": model_config,
-                            "lmax": lmax,
-                            "num_layers": num_layers,
-                            "command": command,
-                        }
-                    )
+                        experiments.append(
+                            {
+                                "name": safe_experiment_name,
+                                "graph_config": graph_config,
+                                "model_config": model_config,
+                                "lmax": lmax,
+                                "num_layers": num_layers,
+                                "seed": seed,
+                                "command": command,
+                            }
+                        )
     return experiments
 
 
@@ -279,6 +322,7 @@ def _sweep_common_args(args: argparse.Namespace) -> dict[str, Any]:
             "model_config",
             "lmax",
             "num_layers",
+            "seed",
             "use_gaunt_self_tensor_product",
         }
     )
@@ -290,6 +334,7 @@ def _sweep_overrides(
     model_config: dict[str, Any],
     lmax: int,
     num_layers: int,
+    seed: int,
     experiment_name: str,
 ) -> dict[str, Any]:
     overrides = {
@@ -298,6 +343,7 @@ def _sweep_overrides(
         "model_config": model_config["model_config"],
         "lmax": lmax,
         "num_layers": num_layers,
+        "seed": seed,
         "experiment_name": experiment_name,
         "device": "cuda:0",
         "gpu_ids": [0],
@@ -310,11 +356,11 @@ def _sweep_overrides(
 
 def _print_sweep_dry_run(
     args: argparse.Namespace,
-    experiments: list[dict[str, Any]],
+    indexed_experiments: list[tuple[int, dict[str, Any]]],
     gpu_ids: list[int],
 ) -> None:
-    for index, experiment in enumerate(experiments, start=1):
-        gpu_id = gpu_ids[(index - 1) % len(gpu_ids)]
+    for queue_index, (index, experiment) in enumerate(indexed_experiments):
+        gpu_id = gpu_ids[queue_index % len(gpu_ids)]
         result_path = args.sweep_results_dir / f"{index:03d}_{experiment['name']}.result.json"
         command_parts = [*experiment["command"], "--results-json", str(result_path)]
         command = " ".join(command_parts)

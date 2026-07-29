@@ -18,6 +18,13 @@ def parse_args():
         help="Path to sweep_results.csv",
     )
     parser.add_argument(
+        "--additional-csv",
+        type=Path,
+        nargs="*",
+        default=[],
+        help="Additional result CSVs to combine with --csv before averaging each heatmap cell.",
+    )
+    parser.add_argument(
         "--output-dir",
         type=Path,
         default=None,
@@ -72,6 +79,10 @@ def create_graph_label(row):
 
 def plot_sweep_results(df, metric, group_by, y_axis, output_dir, figsize, dpi, annotate):
     """Create heatmap plots grouped by a parameter."""
+
+    if metric == "margin_accuracy":
+        df = df.copy()
+        df[metric] = np.where(np.isclose(df[metric], 1.0), 1.0, 0.5)
     
     # Create graph configuration labels
     df["graph_config"] = df.apply(create_graph_label, axis=1)
@@ -104,7 +115,7 @@ def plot_sweep_results(df, metric, group_by, y_axis, output_dir, figsize, dpi, a
                     (df_group[y_axis] == y_val)
                 ]
                 if len(rows) > 0:
-                    matrix[i, j] = rows[metric].values[0]
+                    matrix[i, j] = rows[metric].mean()
         
         # Flip matrix so lowest y-value is at bottom
         matrix = np.flipud(matrix)
@@ -119,13 +130,18 @@ def plot_sweep_results(df, metric, group_by, y_axis, output_dir, figsize, dpi, a
         fig, ax = plt.subplots(figsize=(fig_width, fig_height), dpi=dpi)
         
         # Create custom colormap (red -> yellow -> green)
-        cmap = mcolors.LinearSegmentedColormap.from_list(
-            "accuracy",
-            ["red", "yellow", "green"]
-        )
+        if metric == "margin_accuracy":
+            cmap = mcolors.ListedColormap(["red", "green"], name="binary_accuracy")
+            norm = mcolors.BoundaryNorm([0.0, 0.75, 1.01], cmap.N)
+        else:
+            cmap = mcolors.LinearSegmentedColormap.from_list(
+                "accuracy",
+                ["red", "yellow", "green"]
+            )
+            norm = mcolors.Normalize(vmin=0.5 if metric == "accuracy" else 0, vmax=1)
         
         # Plot heatmap
-        im = ax.imshow(matrix, cmap=cmap, aspect="equal", vmin=0, vmax=1)
+        im = ax.imshow(matrix, cmap=cmap, norm=norm, aspect="equal")
         
         # Add grid lines between cells
         for i in range(len(y_values) + 1):
@@ -147,21 +163,35 @@ def plot_sweep_results(df, metric, group_by, y_axis, output_dir, figsize, dpi, a
             for i in range(len(y_values)):
                 for j in range(len(graph_labels)):
                     if not np.isnan(matrix[i, j]):
-                        text = ax.text(
-                            j, i, f"{matrix[i, j]:.2f}",
+                        ax.text(
+                            j, i - 0.10, f"{matrix[i, j]:.2f}",
                             ha="center", va="center",
                             color="black" if matrix[i, j] > 0.5 else "white",
                             fontsize=8
+                        )
+                        y_val = y_values_display[i]
+                        n_averaged = len(
+                            df_group[
+                                (df_group["ring_n_inner"] == graph_configs[j][0]) &
+                                (df_group["ring_n_outer"] == graph_configs[j][1]) &
+                                (df_group[y_axis] == y_val)
+                            ]
+                        )
+                        ax.text(
+                            j, i + 0.22, f"n={n_averaged}",
+                            ha="center", va="center",
+                            color="black" if matrix[i, j] > 0.5 else "white",
+                            fontsize=5,
                         )
         
         # Labels and title
         ax.set_xlabel("Graph Configuration", fontsize=12, fontweight="bold")
         ax.set_ylabel(y_axis, fontsize=12, fontweight="bold")
-        ax.set_title(f"{group_by}={group_value}", fontsize=14, fontweight="bold")
-        
-        # Add colorbar
-        cbar = plt.colorbar(im, ax=ax)
-        cbar.set_label(metric.replace("_", " ").title(), rotation=270, labelpad=20, fontweight="bold")
+        if group_by == "num_layers":
+            title = f"Equiformer num layers = {group_value}"
+        else:
+            title = f"{group_by} = {group_value}"
+        ax.set_title(title, fontsize=14, fontweight="bold")
         
         plt.tight_layout()
         
@@ -182,12 +212,16 @@ def main():
     if not args.csv.exists():
         raise FileNotFoundError(f"CSV file not found: {args.csv}")
     
-    print(f"Reading: {args.csv}")
-    df = pd.read_csv(args.csv)
+    csv_paths = [args.csv, *args.additional_csv]
+    for csv_path in csv_paths:
+        if not csv_path.exists():
+            raise FileNotFoundError(f"CSV file not found: {csv_path}")
+        print(f"Reading: {csv_path}")
+    df = pd.concat([pd.read_csv(csv_path) for csv_path in csv_paths], ignore_index=True)
     
     # Filter to only successful experiments
     df = df[df["status"] == "ok"].copy()
-    print(f"Found {len(df)} successful experiments")
+    print(f"Found {len(df)} successful experiments across {len(csv_paths)} result files")
     
     # Set output directory
     output_dir = args.output_dir if args.output_dir else args.csv.parent
