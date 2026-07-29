@@ -9,6 +9,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 
 TASK_DIR = Path(__file__).resolve().parent
 REPO_ROOT = TASK_DIR.parents[2]
@@ -63,7 +65,7 @@ def main() -> None:
         dataset_dir = args.data_root / dataset_id
         run_dir = args.run_dir / dataset_id / f"seed{model_seed}" / f"l{lmax}_m{mmax}_lr{format_lr(lr)}"
         config = build_config(args, name, dataset_dir, dataset_id, model_seed, lmax, mmax, lr)
-        config_path.write_text(json.dumps(config, indent=2, sort_keys=False) + "\n", encoding="utf-8")
+        config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
         configs.append(
             {
                 "name": name,
@@ -202,7 +204,7 @@ def build_config(
             "num_workers": args.num_workers,
             "lr_initial": lr,
             "optimizer": "AdamW",
-            "optimizer_params": {"weight_decay": 0.001, "betas": [0.9, 0.98], "eps": 1e-6},
+            "optimizer_params": {"weight_decay": 0.001, "betas": [0.9, 0.98], "eps": 0.000001},
             "scheduler": "LambdaLR",
             "scheduler_params": {
                 "lambda_type": "cosine",

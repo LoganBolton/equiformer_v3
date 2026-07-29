@@ -85,7 +85,9 @@ echo "Loading conda environment..."
 module load miniconda3
 
 if conda info --envs | grep -q "$CONDA_ENV"; then
+  set +u
   source ~/.bashrc
+  set -u
   echo "Activating conda environment '$CONDA_ENV'..."
   conda activate "$CONDA_ENV"
 else

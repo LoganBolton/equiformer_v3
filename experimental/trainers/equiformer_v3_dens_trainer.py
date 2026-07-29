@@ -1049,9 +1049,13 @@ class EquiformerV3DeNSTrainer(EquiformerV2ForcesTrainer):
             for k in scheduler_params.keys():
                 if "epochs" in k:
                     if isinstance(scheduler_params[k], (int, float)):
-                        scheduler_params[k] = int(
+                        original_value = scheduler_params[k]
+                        converted_value = int(
                             multiply(scheduler_params[k], n_iter_per_epoch)
                         )
+                        if "warmup" in k and original_value > 0 and converted_value < 1:
+                            converted_value = 1
+                        scheduler_params[k] = converted_value
                     elif isinstance(scheduler_params[k], list):
                         scheduler_params[k] = [
                             int(x)

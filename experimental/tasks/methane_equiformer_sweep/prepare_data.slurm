@@ -27,7 +27,9 @@ fi
 mkdir -p "$SCRIPT_DIR/logs"
 
 module load miniconda3
+set +u
 source ~/.bashrc
+set -u
 conda activate "$CONDA_ENV"
 
 cd "$PROJECT_ROOT"

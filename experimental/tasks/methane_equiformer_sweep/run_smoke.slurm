@@ -37,7 +37,9 @@ ALIGNED="$TRAIN_RUN_DIR/predictions.npz"
 
 mkdir -p "$TASK_DIR/logs" "$GENERATED_DIR" "$RUN_ROOT" "$PREDICT_ROOT"
 module load miniconda3
+set +u
 source ~/.bashrc
+set -u
 conda activate "$CONDA_ENV"
 cd "$PROJECT_ROOT"
 export PYTHONPATH="$PROJECT_ROOT:$PROJECT_ROOT/src"
@@ -63,7 +65,7 @@ python "$TASK_DIR/generate_sweep.py" \
   --model-seeds "$MODEL_SEED" --split-seed "$SPLIT_SEED" --lmax-values 3 --data-sizes "$DATA_SIZE" \
   --external-test-size "$EXTERNAL_TEST_SIZE" --learning-rates 1e-4 --epochs "$EPOCHS" \
   --batch-size "$BATCH_SIZE" --eval-batch-size "$EVAL_BATCH_SIZE" \
-  --num-workers "${NUM_WORKERS:-4}"
+  --num-workers "${NUM_WORKERS:-0}"
 
 python -u "$PROJECT_ROOT/scripts/train_equiformer_v3_smoke.py" \
   --mode train --config-yml "$CONFIG" --identifier "$NAME" \
