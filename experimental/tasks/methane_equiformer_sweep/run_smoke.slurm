@@ -4,7 +4,7 @@
 #SBATCH --output=./logs/%j_methane_eqv3_smoke.out
 #SBATCH --error=./logs/%j_methane_eqv3_smoke.err
 #SBATCH --time=04:00:00
-#SBATCH --partition=shared-gpu-ampere
+#SBATCH --partition=shared-redstone
 #SBATCH --constraint=gpu_cc:8.0
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
@@ -19,23 +19,22 @@ PROJECT_ROOT="$(cd "$TASK_DIR/../../.." && pwd)"
 CONDA_ENV="${CONDA_ENV:-equiformer_v3}"
 DATA_SIZE="${DATA_SIZE:-1000}"
 EXTERNAL_TEST_SIZE="${EXTERNAL_TEST_SIZE:-1000}"
-SPLIT_SEED="${SPLIT_SEED:-42}"
 MODEL_SEED="${MODEL_SEED:-42}"
+LMAX="${LMAX:-3}"
 EPOCHS="${EPOCHS:-1}"
-BATCH_SIZE="${BATCH_SIZE:-512}"
-EVAL_BATCH_SIZE="${EVAL_BATCH_SIZE:-512}"
-DATASET_ID="methane_train${DATA_SIZE}_test${EXTERNAL_TEST_SIZE}_split${SPLIT_SEED}"
+LEARNING_RATE="${LEARNING_RATE:-2.5e-3}"
+BATCH_SIZE="${BATCH_SIZE:-256}"
+RUN_TAG="${RUN_TAG:-${SLURM_JOB_ID:-manual}}"
+TAG_SUFFIX="_${RUN_TAG}"
+DATASET_ID="methane_train${DATA_SIZE}_test${EXTERNAL_TEST_SIZE}_seed${MODEL_SEED}"
 DATASET_DIR="$TASK_DIR/data/$DATASET_ID"
-GENERATED_DIR="$TASK_DIR/generated/smoke"
-RUN_ROOT="$TASK_DIR/runs/smoke/$DATASET_ID"
-PREDICT_ROOT="$RUN_ROOT/predict"
-NAME="methane_eqv3_l3_m2_data${DATA_SIZE}_test${EXTERNAL_TEST_SIZE}_split${SPLIT_SEED}_lr1em04_seed${MODEL_SEED}"
-CONFIG="$GENERATED_DIR/${NAME}.yml"
-TRAIN_RUN_DIR="$RUN_ROOT/seed${MODEL_SEED}/l3_m2_lr1em04"
-CHECKPOINT="$TRAIN_RUN_DIR/checkpoints/$NAME/best_checkpoint.pt"
-ALIGNED="$TRAIN_RUN_DIR/predictions.npz"
+GENERATED_DIR="$TASK_DIR/generated/smoke${TAG_SUFFIX}"
+RUN_BASE="$TASK_DIR/runs/smoke${TAG_SUFFIX}"
 
-mkdir -p "$TASK_DIR/logs" "$GENERATED_DIR" "$RUN_ROOT" "$PREDICT_ROOT"
+mkdir -p "$TASK_DIR/logs" "$GENERATED_DIR" "$RUN_BASE"
+module load gcc/10.4.0
+module load cuda
+module load cmake
 module load miniconda3
 set +u
 source ~/.bashrc
@@ -47,7 +46,7 @@ export WANDB_MODE="${WANDB_MODE:-disabled}"
 export CUDA_VISIBLE_DEVICES="${SMOKE_GPU_ID:-0}"
 
 python "$TASK_DIR/verify_splits.py" \
-  --data-size "$DATA_SIZE" --external-test-size "$EXTERNAL_TEST_SIZE" --split-seed "$SPLIT_SEED" \
+  --data-size "$DATA_SIZE" --external-test-size "$EXTERNAL_TEST_SIZE" --split-seed "$MODEL_SEED" \
   --indices "$DATASET_DIR/split_indices.npz"
 python "$TASK_DIR/diagnose_lmdb.py" \
   "$DATASET_DIR/train/data.lmdb" --samples 5 --expected-count 800 --manifest "$DATASET_DIR/manifest.json"
@@ -61,11 +60,34 @@ python "$TASK_DIR/diagnose_lmdb.py" \
 python "$TASK_DIR/generate_sweep.py" \
   --output-dir "$GENERATED_DIR" \
   --data-root "$TASK_DIR/data" \
-  --run-dir "$RUN_ROOT" \
-  --model-seeds "$MODEL_SEED" --split-seed "$SPLIT_SEED" --lmax-values 3 --data-sizes "$DATA_SIZE" \
-  --external-test-size "$EXTERNAL_TEST_SIZE" --learning-rates 1e-4 --epochs "$EPOCHS" \
-  --batch-size "$BATCH_SIZE" --eval-batch-size "$EVAL_BATCH_SIZE" \
+  --run-dir "$RUN_BASE" \
+  --model-seeds "$MODEL_SEED" --lmax-values "$LMAX" --data-sizes "$DATA_SIZE" \
+  --external-test-size "$EXTERNAL_TEST_SIZE" --learning-rates "$LEARNING_RATE" --epochs "$EPOCHS" \
+  --batch-size "$BATCH_SIZE" --name-suffix "$RUN_TAG" \
   --num-workers "${NUM_WORKERS:-0}"
+
+readarray -t RUN_FIELDS < <(python - "$GENERATED_DIR/sweep_manifest.json" "$TASK_DIR" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+item = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))[0]
+task_dir = Path(sys.argv[2])
+for key in ("name", "config", "run_dir"):
+    value = Path(item[key]) if key != "name" else item[key]
+    if key == "name":
+        print(value)
+    else:
+        print(value if value.is_absolute() else task_dir / value)
+PY
+)
+NAME="${RUN_FIELDS[0]}"
+CONFIG="${RUN_FIELDS[1]}"
+TRAIN_RUN_DIR="${RUN_FIELDS[2]}"
+PREDICT_ROOT="$RUN_BASE/predict/$NAME"
+CHECKPOINT="$TRAIN_RUN_DIR/checkpoints/$NAME/best_checkpoint.pt"
+ALIGNED="$TRAIN_RUN_DIR/predictions.npz"
+mkdir -p "$TRAIN_RUN_DIR" "$PREDICT_ROOT"
 
 python -u "$PROJECT_ROOT/scripts/train_equiformer_v3_smoke.py" \
   --mode train --config-yml "$CONFIG" --identifier "$NAME" \
@@ -100,9 +122,11 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+import yaml
+
 dataset_manifest, config, checkpoint, predictions, output = map(Path, sys.argv[1:])
 dataset_payload = json.loads(dataset_manifest.read_text(encoding="utf-8"))
-config_payload = json.loads(config.read_text(encoding="utf-8"))
+config_payload = yaml.safe_load(config.read_text(encoding="utf-8"))
 payload = {
     "created_utc": datetime.now(timezone.utc).isoformat(),
     "dataset_manifest": str(dataset_manifest.resolve()),
@@ -115,10 +139,11 @@ payload = {
     "config": str(config.resolve()),
     "best_checkpoint": str(checkpoint.resolve()),
     "predictions": str(predictions.resolve()),
-    "shared_dataset_across_model_seeds": True,
+    "split_matches_hippynn_model_seed": True,
     "methodology": [
-        "A single train/validation/test split generated with split seed 42 was used for every run. Model seeds 42, 250, and 1776 changed only model initialization and training randomness.",
-        "EquiformerV3 used a fixed batch size of 512 with AdamW and warmup followed by cosine learning-rate decay from 1e-4 toward 1e-6. HIP-HOP used adaptive batch-size increases followed by plateau-based learning-rate reductions.",
+        "The model seed also generates the train/validation/internal-test split, exactly as in HIPPYNN.",
+        "Training uses energy RMSE + MAE, componentwise force RMSE + MAE, and 1e-6 weight L2.",
+        "Adam starts at 2.5e-3 with plateau LR reduction; the batch remains at HIPPYNN's starting size.",
     ],
     "slurm_job_id": os.environ.get("SLURM_JOB_ID"),
 }

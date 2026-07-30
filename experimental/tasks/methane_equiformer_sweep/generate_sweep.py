@@ -21,25 +21,35 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, default=TASK_DIR / "configs")
     parser.add_argument("--data-root", type=Path, default=TASK_DIR / "data")
     parser.add_argument("--run-dir", type=Path, default=TASK_DIR / "runs")
-    parser.add_argument("--model-seeds", type=int, nargs="+", default=[42, 250, 1776])
-    parser.add_argument("--split-seed", type=int, default=42)
+    parser.add_argument("--model-seeds", type=int, nargs="+", default=[42, 1776])
     parser.add_argument("--lmax-values", type=int, nargs="+", default=[3, 4])
-    parser.add_argument("--mmax", type=int, default=2)
+    parser.add_argument(
+        "--mmax",
+        type=int,
+        default=None,
+        help="Maximum order. By default use mmax=lmax, the closest analogue to full HIPPYNN lmax.",
+    )
     parser.add_argument("--data-size", type=int, default=1_000_000)
     parser.add_argument("--data-sizes", type=int, nargs="+", default=None)
     parser.add_argument("--external-test-size", type=int, default=80_000)
-    parser.add_argument("--learning-rates", type=float, nargs="+", default=[1e-4])
+    parser.add_argument("--learning-rates", type=float, nargs="+", default=[2.5e-3])
     parser.add_argument("--epochs", type=int, default=10_000)
-    parser.add_argument("--batch-size", type=int, default=512)
-    parser.add_argument("--eval-batch-size", type=int, default=512)
+    parser.add_argument("--batch-size", type=int, default=256)
+    parser.add_argument(
+        "--eval-batch-size",
+        type=int,
+        default=None,
+        help="Override evaluation batch size; defaults to 512 for lmax=3 and 4096 for lmax=4.",
+    )
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--checkpoint-every", type=int, default=None)
     parser.add_argument("--eval-every", type=int, default=None)
+    parser.add_argument("--name-suffix", default="")
     return parser.parse_args()
 
 
-def dataset_name(data_size: int, external_test_size: int, split_seed: int) -> str:
-    return f"methane_train{data_size}_test{external_test_size}_split{split_seed}"
+def dataset_name(data_size: int, external_test_size: int, seed: int) -> str:
+    return f"methane_train{data_size}_test{external_test_size}_seed{seed}"
 
 
 def main() -> None:
@@ -55,11 +65,14 @@ def main() -> None:
         data_sizes,
         args.learning_rates,
     ):
-        mmax = min(args.mmax, lmax)
-        dataset_id = dataset_name(data_size, args.external_test_size, args.split_seed)
+        mmax = lmax if args.mmax is None else min(args.mmax, lmax)
+        dataset_id = dataset_name(data_size, args.external_test_size, model_seed)
+        suffix = args.name_suffix.strip()
+        if suffix and not suffix.startswith("_"):
+            suffix = f"_{suffix}"
         name = (
             f"methane_eqv3_l{lmax}_m{mmax}_data{data_size}_test{args.external_test_size}"
-            f"_split{args.split_seed}_lr{format_lr(lr)}_seed{model_seed}"
+            f"_lr{format_lr(lr)}_seed{model_seed}{suffix}"
         )
         config_path = args.output_dir / f"{name}.yml"
         dataset_dir = args.data_root / dataset_id
@@ -73,7 +86,7 @@ def main() -> None:
                 "dataset_id": dataset_id,
                 "data_size": data_size,
                 "external_test_size": args.external_test_size,
-                "split_seed": args.split_seed,
+                "split_seed": model_seed,
                 "seed": model_seed,
                 "model_seed": model_seed,
                 "lmax": lmax,
@@ -100,10 +113,13 @@ def build_config(
 ) -> dict[str, Any]:
     grid_resolution = [14, 8] if lmax <= 4 else [20, 8]
     ffn_grid_resolution = [14, 14] if lmax <= 4 else [20, 20]
-    train_count = int(0.8 * inferred_data_size(dataset_dir))
+    manifest = load_dataset_manifest(dataset_dir, model_seed)
+    train_count = manifest["splits"]["train"]
     steps_per_epoch = (train_count + args.batch_size - 1) // args.batch_size
     eval_every = args.eval_every or max(1, steps_per_epoch)
     checkpoint_every = args.checkpoint_every or max(1, steps_per_epoch)
+    eval_batch_size = args.eval_batch_size or (512 if lmax == 3 else 4096)
+    energy_mean = manifest["label_statistics"]["train"]["energy_mean"]
     run_dir = args.run_dir / dataset_id / f"seed{model_seed}" / f"l{lmax}_m{mmax}_lr{format_lr(lr)}"
     return {
         "trainer": "equiformer_v3_dens_trainer",
@@ -113,19 +129,22 @@ def build_config(
         "task": {
             "strict_load": True,
             "dataset": "lmdb",
-            "primary_metric": "forces_mae",
+            "primary_metric": "energy_mae",
+            "methane_hippynn_loss": True,
+            "methane_l2_regularization": 1.0e-6,
         },
         "dataset": {
-            "train": dataset_config(dataset_dir / "train"),
-            "val": dataset_config(dataset_dir / "val"),
-            "test": dataset_config(dataset_dir / "test"),
+            "train": dataset_config(dataset_dir / "train", energy_mean),
+            "val": dataset_config(dataset_dir / "val", energy_mean),
+            "test": dataset_config(dataset_dir / "test", energy_mean),
             "metadata": {
                 "dataset_id": dataset_id,
-                "split_seed": args.split_seed,
+                "split_seed": model_seed,
                 "model_seed": model_seed,
                 "data_size": inferred_data_size(dataset_dir),
                 "external_test_size": args.external_test_size,
-                "shared_across_model_seeds": True,
+                "shared_across_model_seeds": False,
+                "split_matches_hippynn_model_seed": True,
             },
         },
         "outputs": {
@@ -140,10 +159,10 @@ def build_config(
         },
         "loss_functions": [
             {"energy": {"fn": "mae", "coefficient": 1}},
-            {"forces": {"fn": "l2mae", "coefficient": 1}},
+            {"forces": {"fn": "mae", "coefficient": 1}},
         ],
         "evaluation_metrics": {
-            "primary_metric": "forces_mae",
+            "primary_metric": "energy_mae",
             "metrics": {
                 "energy": ["mae", "per_atom_mae"],
                 "forces": ["mae", "cosine_similarity", "magnitude_error"],
@@ -193,24 +212,26 @@ def build_config(
             "ffn_drop": 0.0,
             "gradient_checkpointing_block_list": [0],
             "enforce_max_neighbors_strictly": True,
-            "avg_num_nodes": 5,
+            "avg_num_nodes": 1,
+            "avg_degree": 4,
         },
         "optim": {
             "batch_size": args.batch_size,
-            "eval_batch_size": args.eval_batch_size,
+            "eval_batch_size": eval_batch_size,
             "grad_accumulation_steps": 1,
             "load_balancing": False,
             "load_balancing_on_error": "warn_and_no_balance",
             "num_workers": args.num_workers,
             "lr_initial": lr,
-            "optimizer": "AdamW",
-            "optimizer_params": {"weight_decay": 0.001, "betas": [0.9, 0.98], "eps": 0.000001},
-            "scheduler": "LambdaLR",
+            "optimizer": "Adam",
+            "optimizer_params": {"weight_decay": 0.0},
+            "scheduler": "ReduceLROnPlateau",
             "scheduler_params": {
-                "lambda_type": "cosine",
-                "warmup_factor": 0.0,
-                "warmup_epochs": 0.1,
-                "lr_min_factor": 0.01,
+                "mode": "min",
+                "factor": 0.5,
+                "patience": 150,
+                "threshold": 0.0001,
+                "threshold_mode": "rel",
             },
             "max_epochs": args.epochs,
             "clip_grad_norm": 100,
@@ -225,28 +246,56 @@ def build_config(
         "cmd_note": {
             "name": name,
             "dataset_id": dataset_id,
-            "split_seed": args.split_seed,
+            "split_seed": model_seed,
             "model_seed": model_seed,
             "run_dir": str(run_dir),
             "methodology": [
-                "A single train/validation/test split generated with split seed 42 was used for every run. Model seeds 42, 250, and 1776 changed only model initialization and training randomness.",
-                "EquiformerV3 used a fixed batch size of 512 with AdamW and warmup followed by cosine learning-rate decay from 1e-4 toward 1e-6. HIP-HOP used adaptive batch-size increases followed by plateau-based learning-rate reductions.",
+                "The model seed also generates the train/validation/internal-test split, exactly as in the HIPPYNN methane program.",
+                "The loss is energy RMSE + energy MAE + componentwise force RMSE + componentwise force MAE + 1e-6 weight L2.",
+                "Adam starts at 2.5e-3. Fair-Chem uses the HIPPYNN plateau LR rule but a fixed starting batch because it cannot safely rebuild loaders on a batch-size plateau.",
             ],
         },
     }
 
 
-def dataset_config(src: Path) -> dict[str, Any]:
+def dataset_config(src: Path, energy_mean: float = 0.0) -> dict[str, Any]:
     return {
         "format": "lmdb",
         "src": str(src),
         "transforms": {
             "normalizer": {
-                "energy": {"mean": 0.0, "stdev": 1.0},
+                "energy": {"mean": energy_mean, "stdev": 1.0},
                 "forces": {"mean": 0.0, "stdev": 1.0},
             }
         },
     }
+
+
+def load_dataset_manifest(dataset_dir: Path, expected_seed: int) -> dict[str, Any]:
+    manifest_path = dataset_dir / "manifest.json"
+    if not manifest_path.is_file():
+        raise FileNotFoundError(
+            f"Complete seed-specific dataset manifest not found: {manifest_path}. "
+            "Run prepare_methane_lmdb.py first."
+        )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if manifest.get("split_seed") != expected_seed:
+        raise ValueError(
+            f"{manifest_path} has split_seed={manifest.get('split_seed')}, expected {expected_seed}"
+        )
+    data_size = inferred_data_size(dataset_dir)
+    heldout_count = int(0.1 * data_size)
+    remaining_count = data_size - heldout_count
+    val_count = int((0.1 / 0.9) * remaining_count)
+    expected = {
+        "train": remaining_count - val_count,
+        "val": val_count,
+        "heldout": heldout_count,
+    }
+    expected["test"] = manifest["external_test_size"]
+    if manifest.get("splits") != expected:
+        raise ValueError(f"{manifest_path} split counts {manifest.get('splits')} != {expected}")
+    return manifest
 
 
 def inferred_data_size(dataset_dir: Path) -> int:
@@ -254,7 +303,7 @@ def inferred_data_size(dataset_dir: Path) -> int:
 
 
 def format_lr(lr: float) -> str:
-    return f"{lr:.0e}".replace("+", "").replace("-", "m")
+    return f"{lr:.8g}".replace(".", "p").replace("+", "").replace("-", "m")
 
 
 def display_path(path: Path) -> str:

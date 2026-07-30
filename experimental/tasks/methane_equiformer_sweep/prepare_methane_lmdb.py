@@ -45,7 +45,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--data-size", type=positive_int, default=1_000_000)
     parser.add_argument("--data-sizes", type=positive_int, nargs="+", default=None)
     parser.add_argument("--external-test-size", type=positive_int, default=80_000)
-    parser.add_argument("--split-seed", type=int, default=42)
+    parser.add_argument(
+        "--model-seeds",
+        type=int,
+        nargs="+",
+        default=[42, 1776],
+        help="Each seed is used for both model initialization and the HIPPYNN data split.",
+    )
     parser.add_argument("--max-neighbors", type=int, default=4)
     parser.add_argument("--radius", type=float, default=10.3)
     parser.add_argument("--molecule-cell-size", type=float, default=32.0)
@@ -57,7 +63,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def dataset_name(data_size: int, external_test_size: int, split_seed: int) -> str:
-    return f"methane_train{data_size}_test{external_test_size}_split{split_seed}"
+    return f"methane_train{data_size}_test{external_test_size}_seed{split_seed}"
 
 
 def main() -> None:
@@ -69,40 +75,52 @@ def main() -> None:
 
 
 def prepare_one_size(args: argparse.Namespace, data_size: int) -> None:
-    dataset_dir = args.output_root / dataset_name(data_size, args.external_test_size, args.split_seed)
-    if dataset_dir.exists():
-        if not args.overwrite:
-            manifest = dataset_dir / "manifest.json"
-            indices = dataset_dir / "split_indices.npz"
-            if manifest.is_file() and indices.is_file():
-                print(f"{dataset_dir} is complete; use --overwrite to rebuild.")
-                return
-            raise RuntimeError(
-                f"{dataset_dir} exists without completion metadata. Move it aside or use --overwrite."
-            )
-        shutil.rmtree(dataset_dir)
+    seeds = list(dict.fromkeys(args.model_seeds))
+    datasets: dict[int, dict] = {}
+    for seed in seeds:
+        dataset_dir = args.output_root / dataset_name(data_size, args.external_test_size, seed)
+        if dataset_dir.exists():
+            if not args.overwrite:
+                manifest = dataset_dir / "manifest.json"
+                indices_path = dataset_dir / "split_indices.npz"
+                if manifest.is_file() and indices_path.is_file():
+                    print(f"{dataset_dir} is complete; use --overwrite to rebuild.")
+                    continue
+                raise RuntimeError(
+                    f"{dataset_dir} exists without completion metadata. Move it aside or use --overwrite."
+                )
+            shutil.rmtree(dataset_dir)
 
-    build_dir = dataset_dir.with_name(f".{dataset_dir.name}.building-{uuid.uuid4().hex}")
-    build_dir.mkdir(parents=True)
+        build_dir = dataset_dir.with_name(f".{dataset_dir.name}.building-{uuid.uuid4().hex}")
+        build_dir.mkdir(parents=True)
+        indices = make_hippynn_splits(data_size, seed, args.external_test_size)
+        split_counts = {
+            "train": len(indices["train"]),
+            "val": len(indices["valid"]),
+            "heldout": len(indices["internal_test"]),
+            "test": args.external_test_size,
+        }
+        assignments = np.zeros(data_size, dtype=np.uint8)
+        assignments[indices["valid"]] = 1
+        assignments[indices["internal_test"]] = 2
+        writers = {
+            split: LmdbWriter(build_dir / split / "data.lmdb", args.map_size_gb, args.commit_interval)
+            for split in split_counts
+        }
+        datasets[seed] = {
+            "dataset_dir": dataset_dir,
+            "build_dir": build_dir,
+            "indices": indices,
+            "split_counts": split_counts,
+            "assignments": assignments,
+            "writers": writers,
+            "natoms": {split: [] for split in split_counts},
+            "energy_sum": {split: 0.0 for split in split_counts},
+            "energy_sum_sq": {split: 0.0 for split in split_counts},
+        }
 
-    indices = make_hippynn_splits(data_size, args.split_seed, args.external_test_size)
-    split_counts = {
-        "train": len(indices["train"]),
-        "val": len(indices["valid"]),
-        "heldout": len(indices["internal_test"]),
-        "test": args.external_test_size,
-    }
-    split_sids = {
-        "train": set(indices["train"].tolist()),
-        "val": set(indices["valid"].tolist()),
-        "heldout": set(indices["internal_test"].tolist()),
-    }
-
-    writers = {
-        split: LmdbWriter(build_dir / split / "data.lmdb", args.map_size_gb, args.commit_interval)
-        for split in split_counts
-    }
-    natoms = {split: [] for split in split_counts}
+    if not datasets:
+        return
 
     total_frames_needed = data_size + args.external_test_size
     try:
@@ -112,7 +130,6 @@ def prepare_one_size(args: argparse.Namespace, data_size: int) -> None:
         ):
             if frame_index >= total_frames_needed:
                 break
-            split = split_for_index(frame_index, data_size, split_sids)
             data = convert_methane_atoms(atoms, molecule_cell_size=args.molecule_cell_size)
             validate_unconverted_frame(data, frame_index)
             data.sid = frame_index
@@ -123,18 +140,19 @@ def prepare_one_size(args: argparse.Namespace, data_size: int) -> None:
             )
             data.forces = data.forces * HARTREE_PER_BOHR_TO_KCAL_MOL_PER_ANG
             validate_converted_frame(data, frame_index, args.radius)
-            writers[split].write(data)
-            natoms[split].append(int(data.natoms))
+            energy = float(data.energy)
+            payload = pickle.dumps(data, protocol=-1)
+            for state in datasets.values():
+                split = split_for_assignment(frame_index, data_size, state["assignments"])
+                state["writers"][split].write_payload(payload)
+                state["natoms"][split].append(int(data.natoms))
+                state["energy_sum"][split] += energy
+                state["energy_sum_sq"][split] += energy * energy
     finally:
-        for writer in writers.values():
-            writer.close()
+        for state in datasets.values():
+            for writer in state["writers"].values():
+                writer.close()
 
-    for split, count in split_counts.items():
-        if writers[split].count != count:
-            raise RuntimeError(f"Expected {count} {split} samples, wrote {writers[split].count}.")
-        np.savez(build_dir / split / "metadata.npz", natoms=np.asarray(natoms[split], dtype=np.int64))
-
-    np.savez_compressed(build_dir / "split_indices.npz", **indices)
     command = " ".join([sys.executable, *sys.argv])
     try:
         commit = subprocess.check_output(
@@ -143,37 +161,61 @@ def prepare_one_size(args: argparse.Namespace, data_size: int) -> None:
     except (OSError, subprocess.CalledProcessError):
         commit = None
 
-    manifest = {
-        "dataset_name": dataset_dir.name,
-        "purpose": args.purpose,
-        "source_trajectory": str(args.data_src.resolve()),
-        "data_size": data_size,
-        "external_test_size": args.external_test_size,
-        "split_seed": args.split_seed,
-        "model_seed": None,
-        "valid_fraction_of_full_pool": 0.1,
-        "internal_test_fraction_of_full_pool": 0.1,
-        "energy_units": "kcal/mol shifted by HIPHOP_ENERGY_MEAN",
-        "force_units": "kcal/mol/Angstrom",
-        "hiphop_energy_mean": HIPHOP_ENERGY_MEAN,
-        "energy_conversion_factor": HARTREE_TO_KCAL_MOL,
-        "force_conversion_factor": HARTREE_PER_BOHR_TO_KCAL_MOL_PER_ANG,
-        "splits": split_counts,
-        "index_sha256": {name: index_sha256(value) for name, value in indices.items()},
-        "git_commit": commit,
-        "generation_command": command,
-        "selection": "first data_size frames define the development pool; the next external_test_size sequential frames define the external test set",
-        "position_units": "Angstrom",
-        "label_dtype": "float32",
-        "atomic_numbers": EXPECTED_METHANE_ATOMIC_NUMBERS,
-        "atoms_per_frame": 5,
-        "pbc": [False, False, False],
-        "max_radius_angstrom": args.radius,
-        "max_neighbors": args.max_neighbors,
-    }
-    (build_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    build_dir.rename(dataset_dir)
-    print(f"Wrote methane LMDB dataset to {dataset_dir}")
+    for seed, state in datasets.items():
+        split_counts = state["split_counts"]
+        for split, count in split_counts.items():
+            writer = state["writers"][split]
+            if writer.count != count:
+                raise RuntimeError(f"Seed {seed}: expected {count} {split} samples, wrote {writer.count}.")
+            np.savez(
+                state["build_dir"] / split / "metadata.npz",
+                natoms=np.asarray(state["natoms"][split], dtype=np.int64),
+            )
+
+        np.savez_compressed(state["build_dir"] / "split_indices.npz", **state["indices"])
+        label_statistics = {}
+        for split, count in split_counts.items():
+            mean = state["energy_sum"][split] / count
+            variance = max(0.0, state["energy_sum_sq"][split] / count - mean * mean)
+            label_statistics[split] = {
+                "energy_mean": mean,
+                "energy_std_ddof0": variance**0.5,
+            }
+        manifest = {
+            "dataset_name": state["dataset_dir"].name,
+            "purpose": args.purpose,
+            "source_trajectory": str(args.data_src.resolve()),
+            "data_size": data_size,
+            "external_test_size": args.external_test_size,
+            "split_seed": seed,
+            "model_seed": seed,
+            "split_matches_hippynn_model_seed": True,
+            "valid_fraction_of_full_pool": 0.1,
+            "internal_test_fraction_of_full_pool": 0.1,
+            "energy_units": "kcal/mol shifted by HIPHOP_ENERGY_MEAN",
+            "force_units": "kcal/mol/Angstrom",
+            "hiphop_energy_mean": HIPHOP_ENERGY_MEAN,
+            "energy_conversion_factor": HARTREE_TO_KCAL_MOL,
+            "force_conversion_factor": HARTREE_PER_BOHR_TO_KCAL_MOL_PER_ANG,
+            "splits": split_counts,
+            "label_statistics": label_statistics,
+            "index_sha256": {name: index_sha256(value) for name, value in state["indices"].items()},
+            "git_commit": commit,
+            "generation_command": command,
+            "selection": "first data_size frames define the development pool; the next external_test_size sequential frames define the external test set",
+            "position_units": "Angstrom",
+            "label_dtype": "float32",
+            "atomic_numbers": EXPECTED_METHANE_ATOMIC_NUMBERS,
+            "atoms_per_frame": 5,
+            "pbc": [False, False, False],
+            "max_radius_angstrom": args.radius,
+            "max_neighbors": args.max_neighbors,
+        }
+        (state["build_dir"] / "manifest.json").write_text(
+            json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+        state["build_dir"].rename(state["dataset_dir"])
+        print(f"Wrote methane LMDB dataset to {state['dataset_dir']}")
 
 
 def validate_unconverted_frame(data: Data, frame_index: int) -> None:
@@ -276,16 +318,17 @@ def iter_methane_extxyz(path: Path):
             frame_index += 1
 
 
-def split_for_index(frame_index: int, data_size: int, split_sids: dict[str, set[int]]) -> str:
+def split_for_assignment(frame_index: int, data_size: int, assignments: np.ndarray) -> str:
     if frame_index >= data_size:
         return "test"
-    if frame_index in split_sids["heldout"]:
+    assignment = int(assignments[frame_index])
+    if assignment == 2:
         return "heldout"
-    if frame_index in split_sids["val"]:
+    if assignment == 1:
         return "val"
-    if frame_index in split_sids["train"]:
+    if assignment == 0:
         return "train"
-    raise RuntimeError(f"Development-pool source frame {frame_index} was not assigned to any split")
+    raise RuntimeError(f"Invalid split assignment {assignment} for source frame {frame_index}")
 
 
 class LmdbWriter:
@@ -303,7 +346,10 @@ class LmdbWriter:
         self.txn = self.env.begin(write=True)
 
     def write(self, data: object) -> None:
-        self.txn.put(str(self.count).encode("ascii"), pickle.dumps(data, protocol=-1))
+        self.write_payload(pickle.dumps(data, protocol=-1))
+
+    def write_payload(self, payload: bytes) -> None:
+        self.txn.put(str(self.count).encode("ascii"), payload)
         self.count += 1
         if self.count % self.commit_interval == 0:
             self.txn.commit()

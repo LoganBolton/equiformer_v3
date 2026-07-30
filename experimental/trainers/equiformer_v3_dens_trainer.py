@@ -562,6 +562,9 @@ class EquiformerV3DeNSTrainer(EquiformerV2ForcesTrainer):
     
 
     def _compute_loss(self, out, batch):
+        if self.config["task"].get("methane_hippynn_loss", False):
+            return self._compute_methane_hippynn_loss(out, batch)
+
         batch_size = batch.natoms.numel()
         fixed = batch.fixed
         mask = fixed == 0
@@ -707,6 +710,47 @@ class EquiformerV3DeNSTrainer(EquiformerV2ForcesTrainer):
 
         loss = sum(loss)
         return loss
+
+    def _compute_methane_hippynn_loss(self, out, batch):
+        """Reproduce the objective in HIPPYNN's methane_configurations.py.
+
+        Methane sweep jobs are single-GPU jobs, so these are the exact batch
+        reductions used by HIPPYNN: scalar energy RMSE + MAE, componentwise
+        force RMSE + MAE, and L2 over weight tensors (not biases).
+        """
+        energy_target = batch.energy.view(-1, 1)
+        energy_prediction = out["energy"].view_as(energy_target)
+        if self.normalizers.get("energy", False):
+            energy_target = self.normalizers["energy"].norm(energy_target)
+
+        free_atom_mask = batch.fixed == 0
+        force_target = batch.forces[free_atom_mask].reshape(-1)
+        force_prediction = out["forces"][free_atom_mask].reshape(-1)
+        if self.normalizers.get("forces", False):
+            force_target = self.normalizers["forces"].norm(force_target)
+
+        energy_error = energy_prediction - energy_target
+        force_error = force_prediction - force_target
+        energy_mae = energy_error.abs().mean()
+        energy_rmse = energy_error.square().mean().sqrt()
+        force_mae = force_error.abs().mean()
+        force_rmse = force_error.square().mean().sqrt()
+
+        regularization_coefficient = float(
+            self.config["task"].get("methane_l2_regularization", 1.0e-6)
+        )
+        weight_l2 = sum(
+            parameter.square().sum()
+            for parameter in self.model.parameters()
+            if parameter.requires_grad and parameter.ndim > 1
+        )
+        return (
+            energy_rmse
+            + energy_mae
+            + force_rmse
+            + force_mae
+            + regularization_coefficient * weight_l2
+        )
 
     def _compute_metrics(self, out, batch, evaluator, metrics={}):
         # this function changes the values in the out dictionary,
@@ -962,12 +1006,6 @@ class EquiformerV3DeNSTrainer(EquiformerV2ForcesTrainer):
 
             predictions["ids"].extend(systemids)
 
-        for key in predictions:
-            if isinstance(predictions[key][0], np.ndarray):
-                predictions[key] = np.concatenate(predictions[key], axis=0)
-            else:
-                predictions[key] = np.array(predictions[key])
-        
         self.save_results(predictions, results_file)
 
         if self.ema:

@@ -82,6 +82,9 @@ nvidia-smi
 
 echo ""
 echo "Loading conda environment..."
+module load gcc/10.4.0
+module load cuda
+module load cmake
 module load miniconda3
 
 if conda info --envs | grep -q "$CONDA_ENV"; then
@@ -105,6 +108,8 @@ mkdir -p "$SCRIPT_DIR/logs" "$SCRIPT_DIR/runs" "$SCRIPT_DIR/wandb"
 export PYTHONPATH="$PROJECT_ROOT:$PROJECT_ROOT/src"
 export WANDB_MODE="$WANDB_MODE"
 export WANDB_DIR="${WANDB_DIR:-$SCRIPT_DIR/wandb}"
+
+python "$SCRIPT_DIR/preflight.py" "$MANIFEST"
 
 SWEEP_COUNT="$(python - "$MANIFEST" <<'PY'
 import json
