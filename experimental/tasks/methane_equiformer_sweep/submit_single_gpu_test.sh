@@ -11,11 +11,12 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 ENV_NAME="${ENV_NAME:-equiformer_v3}"
-DATASET_DIR="$PROJECT_ROOT/experimental/datasets"
-DATA_FILE="$DATASET_DIR/methane.extxyz"
+SOURCE_DATA_DIR="$PROJECT_ROOT/experimental/datasets"
+DATA_FILE="$SOURCE_DATA_DIR/methane.extxyz"
 ARCHIVE="$DATA_FILE.gz"
 DOWNLOAD_URL="https://archive.materialscloud.org/records/kz78r-6nx43/files/methane.extxyz.gz?download=1"
 EXPECTED_MD5="11cf7303d8c0fa6ef753103f5439d6e"
+LOCAL_METHANE_FILE="${LOCAL_METHANE_FILE:-$HOME/Github/hippynn-optimizations-expanded/datasets/methane.extxyz}"
 
 MODEL_SEED="${MODEL_SEED:-42}"
 LMAX="${LMAX:-3}"
@@ -25,6 +26,8 @@ EPOCHS="${EPOCHS:-50}"
 BATCH_SIZE="${BATCH_SIZE:-32}"
 EVAL_BATCH_SIZE="${EVAL_BATCH_SIZE:-64}"
 LEARNING_RATE="${LEARNING_RATE:-2.5e-3}"
+DATASET_ID="methane_train${DATA_SIZE}_test${EXTERNAL_TEST_SIZE}_seed${MODEL_SEED}"
+DATASET_DIR="$SCRIPT_DIR/data/$DATASET_ID"
 
 case "$LMAX" in
     3|4) ;;
@@ -46,19 +49,24 @@ if ! conda env list | awk '{print $1}' | grep -qx "$ENV_NAME"; then
 fi
 conda activate "$ENV_NAME"
 
-mkdir -p "$DATASET_DIR" "$SCRIPT_DIR/logs"
+mkdir -p "$SOURCE_DATA_DIR" "$SCRIPT_DIR/logs"
 
 if [ ! -f "$DATA_FILE" ]; then
-    if [ ! -f "$ARCHIVE" ]; then
-        echo "Downloading methane.extxyz.gz (about 1.1 GiB)..."
-        curl --fail --location --continue-at - \
-            "$DOWNLOAD_URL" \
-            --output "$ARCHIVE"
-    fi
+    if [ -f "$LOCAL_METHANE_FILE" ]; then
+        echo "Linking existing methane.extxyz from: $LOCAL_METHANE_FILE"
+        ln -sfn "$LOCAL_METHANE_FILE" "$DATA_FILE"
+    else
+        if [ ! -f "$ARCHIVE" ]; then
+            echo "Downloading methane.extxyz.gz (about 1.1 GiB)..."
+            curl --fail --location --continue-at - \
+                "$DOWNLOAD_URL" \
+                --output "$ARCHIVE"
+        fi
 
-    echo "$EXPECTED_MD5  $ARCHIVE" | md5sum --check -
-    echo "Decompressing methane.extxyz.gz..."
-    gzip --decompress --keep "$ARCHIVE"
+        echo "$EXPECTED_MD5  $ARCHIVE" | md5sum --check -
+        echo "Decompressing methane.extxyz.gz..."
+        gzip --decompress --keep "$ARCHIVE"
+    fi
 fi
 
 cd "$PROJECT_ROOT"
@@ -68,6 +76,19 @@ python "$SCRIPT_DIR/prepare_methane_lmdb.py" \
     --external-test-size "$EXTERNAL_TEST_SIZE" \
     --model-seeds "$MODEL_SEED" \
     --purpose hippynn_matched_small_a100_stress
+
+for REQUIRED in \
+    "$DATASET_DIR/manifest.json" \
+    "$DATASET_DIR/split_indices.npz" \
+    "$DATASET_DIR/train/data.lmdb" \
+    "$DATASET_DIR/val/data.lmdb" \
+    "$DATASET_DIR/heldout/data.lmdb" \
+    "$DATASET_DIR/test/data.lmdb"; do
+    if [ ! -f "$REQUIRED" ]; then
+        echo "Dataset preparation did not produce expected file: $REQUIRED" >&2
+        exit 1
+    fi
+done
 
 cd "$SCRIPT_DIR"
 JOB_ID="$(
@@ -83,6 +104,7 @@ echo "  job: $JOB_ID"
 echo "  seed: $MODEL_SEED"
 echo "  lmax/mmax: $LMAX/$LMAX"
 echo "  data: $DATA_SIZE development + $EXTERNAL_TEST_SIZE external test"
+echo "  dataset: $DATASET_DIR"
 echo "  epochs: $EPOCHS"
 echo
 echo "Check it with: squeue -j $JOB_ID"

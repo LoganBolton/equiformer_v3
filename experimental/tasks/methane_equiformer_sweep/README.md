@@ -141,6 +141,38 @@ ls experimental/tasks/methane_equiformer_sweep/logs/
 tail -f experimental/tasks/methane_equiformer_sweep/logs/JOB_ID_methane_eqv3_single_test.out
 ```
 
+### TensorBoard
+
+From the repository root on `darwin-fe1`, start TensorBoard with the methane
+task's `runs` directory:
+
+```bash
+cd /vast/home/logan_bolton/Github/equiformer_v3
+tensorboard \
+  --logdir experimental/tasks/methane_equiformer_sweep/runs \
+  --port 6007 --bind_all \
+  --reload_interval 5
+```
+
+Then open:
+
+```text
+http://darwin-fe1.lanl.gov:6007/?darkMode=true#timeseries
+```
+
+Leave the TensorBoard command running while viewing the page; stop it with
+`Ctrl+C`. New runs and metrics are scanned every five seconds, although the
+browser may occasionally need to be refreshed.
+
+Do not use the repository-level `runs` directory for this workflow. Running
+`tensorboard --logdir runs` from the repository root only shows runs stored
+there (such as `cpu_smoke` and `gpu_smoke`), not the methane experiments.
+
+If port `6007` is already occupied, choose another unused server port in both
+the command and URL. When direct access to `darwin-fe1` is unavailable, forward
+the server port using the VS Code **Ports** panel and open the local forwarded
+address it provides.
+
 Run the workflow tests with:
 
 ```bash

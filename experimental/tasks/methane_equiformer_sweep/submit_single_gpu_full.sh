@@ -19,6 +19,7 @@ DATA_FILE="$DATASET_SOURCE_DIR/methane.extxyz"
 ARCHIVE="$DATA_FILE.gz"
 DOWNLOAD_URL="https://archive.materialscloud.org/records/kz78r-6nx43/files/methane.extxyz.gz?download=1"
 EXPECTED_MD5="11cf7303d8c0fa6ef753103f5439d6e"
+LOCAL_METHANE_FILE="${LOCAL_METHANE_FILE:-$HOME/Github/hippynn-optimizations-expanded/datasets/methane.extxyz}"
 
 MODEL_SEED="${MODEL_SEED:-42}"
 LMAX="${LMAX:-3}"
@@ -53,15 +54,20 @@ conda activate "$ENV_NAME"
 
 mkdir -p "$DATASET_SOURCE_DIR" "$SCRIPT_DIR/logs"
 if [ ! -f "$DATA_FILE" ]; then
-    if [ ! -f "$ARCHIVE" ]; then
-        echo "Downloading methane.extxyz.gz (about 1.1 GiB)..."
-        curl --fail --location --continue-at - \
-            "$DOWNLOAD_URL" \
-            --output "$ARCHIVE"
+    if [ -f "$LOCAL_METHANE_FILE" ]; then
+        echo "Linking existing methane.extxyz from: $LOCAL_METHANE_FILE"
+        ln -sfn "$LOCAL_METHANE_FILE" "$DATA_FILE"
+    else
+        if [ ! -f "$ARCHIVE" ]; then
+            echo "Downloading methane.extxyz.gz (about 1.1 GiB)..."
+            curl --fail --location --continue-at - \
+                "$DOWNLOAD_URL" \
+                --output "$ARCHIVE"
+        fi
+        echo "$EXPECTED_MD5  $ARCHIVE" | md5sum --check -
+        echo "Decompressing methane.extxyz.gz..."
+        gzip --decompress --keep "$ARCHIVE"
     fi
-    echo "$EXPECTED_MD5  $ARCHIVE" | md5sum --check -
-    echo "Decompressing methane.extxyz.gz..."
-    gzip --decompress --keep "$ARCHIVE"
 fi
 
 PREP_JOB=""
