@@ -13,13 +13,40 @@ for path in (ROOT, ROOT / "src"):
         sys.path.insert(0, path_str)
 
 
-def _install_torch_scatter_fallback() -> None:
-    try:
-        import torch_scatter  # noqa: F401
+def _probe(description: str, call) -> bool:
+    """Return True if a compiled extension is present AND runs on this GPU.
 
+    A wheel built without the local GPU's architecture imports perfectly well
+    and only fails when a kernel is launched ("no kernel image is available for
+    execution on the device"), so importing is not evidence enough. Probe on the
+    device that training will actually use.
+    """
+    import torch
+
+    try:
+        call(torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu"))
+    except Exception as error:  # noqa: BLE001 - any failure means "unusable here"
+        print(
+            f"[compat] {description} is unavailable, substituting a pure-torch "
+            f"equivalent. Results are unaffected but this is not the reference "
+            f"code path. Reason: {type(error).__name__}: {error}",
+            file=sys.stderr,
+        )
+        return False
+    return True
+
+
+def _install_torch_scatter_fallback() -> None:
+    def probe(device):
+        import torch
+        import torch_scatter
+
+        source = torch.ones(4, 2, device=device)
+        index = torch.zeros(4, dtype=torch.long, device=device)
+        torch_scatter.scatter(source, index, dim=0)
+
+    if _probe("torch-scatter", probe):
         return
-    except OSError:
-        pass
 
     import torch
     from torch_geometric.utils import scatter as pyg_scatter
@@ -84,7 +111,86 @@ def _install_torch_scatter_fallback() -> None:
     sys.modules["torch_scatter.utils"] = utils
 
 
+def _install_radius_graph_fallback() -> None:
+    """Provide a pure-torch ``radius_graph`` when no compiled backend exists.
+
+    ``torch_geometric.nn.radius_graph`` needs either torch-cluster or pyg-lib,
+    whose CUDA kernels have to be built for the exact GPU architecture in use.
+    Rather than requiring every machine to compile them, fall back to a dense
+    implementation. Molecules here are tiny (5 atoms), so the cost is
+    negligible and the result matches torch-cluster edge for edge.
+    """
+    import torch
+    import torch_geometric
+    import torch_geometric.nn
+
+    def probe(device):
+        positions = torch.zeros(4, 3, device=device)
+        batch = torch.zeros(4, dtype=torch.long, device=device)
+        torch_geometric.nn.radius_graph(positions, r=1.0, batch=batch, max_num_neighbors=4)
+
+    if _probe("torch_geometric.nn.radius_graph", probe):
+        return
+
+    def radius_graph(
+        x,
+        r,
+        batch=None,
+        loop=False,
+        max_num_neighbors=32,
+        flow="source_to_target",
+        num_workers=1,
+        batch_size=None,
+    ):
+        assert flow in ("source_to_target", "target_to_source")
+        num_nodes = x.size(0)
+        if batch is None:
+            batch = torch.zeros(num_nodes, dtype=torch.long, device=x.device)
+
+        with torch.no_grad():
+            num_graphs = int(batch.max().item()) + 1 if num_nodes else 0
+            counts = torch.bincount(batch, minlength=num_graphs)
+            width = int(counts.max().item()) if num_graphs else 0
+            offsets = torch.cat([counts.new_zeros(1), counts.cumsum(0)])
+            node_index = torch.arange(num_nodes, device=x.device)
+            slot = node_index - offsets[batch]
+
+            # Scatter the flat node list into a [graph, slot, 3] dense block so
+            # every graph's pairwise distances are computed independently.
+            positions = x.new_zeros((num_graphs, width, x.size(1)))
+            positions[batch, slot] = x.detach()
+            flat_index = torch.full(
+                (num_graphs, width), -1, dtype=torch.long, device=x.device
+            )
+            flat_index[batch, slot] = node_index
+            occupied = flat_index >= 0
+
+            distance = torch.cdist(
+                positions, positions, compute_mode="donot_use_mm_for_euclid_dist"
+            )
+            mask = (distance <= r) & occupied.unsqueeze(1) & occupied.unsqueeze(2)
+            if not loop:
+                identity = torch.eye(width, dtype=torch.bool, device=x.device)
+                mask &= ~identity.unsqueeze(0)
+            if max_num_neighbors is not None:
+                # torch-cluster keeps the first neighbours it encounters in
+                # index order rather than the nearest ones; match that.
+                mask &= mask.cumsum(dim=2) <= max_num_neighbors
+
+            graph, center, neighbor = mask.nonzero(as_tuple=True)
+            target = flat_index[graph, center]
+            source = flat_index[graph, neighbor]
+
+        if flow == "source_to_target":
+            return torch.stack([source, target], dim=0)
+        return torch.stack([target, source], dim=0)
+
+    torch_geometric.nn.radius_graph = radius_graph
+    torch_geometric.nn.pool.radius_graph = radius_graph
+
+
 _install_torch_scatter_fallback()
+_install_radius_graph_fallback()
 
 # The standard FairChem auto-import hook only loads experimental modules listed
 # in experimental/.include. This checkout does not have that file, so register

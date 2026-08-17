@@ -9,7 +9,12 @@ core.*
 
 experimental/tasks/test_fashp_many_body_ring/sweep_results/*
 experimental/datasets/methane.extxyz
+experimental/datasets/methane.extxyz.gz
 experimental/tasks/methane_equiformer_sweep/data/
 experimental/tasks/methane_equiformer_sweep/generated/
 experimental/tasks/methane_equiformer_sweep/runs/
 experimental/tasks/methane_equiformer_sweep/logs/
+
+# Local virtualenv created by run_local.sh
+.venv/
+.venv-*/

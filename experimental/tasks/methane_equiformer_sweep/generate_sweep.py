@@ -54,6 +54,11 @@ def dataset_name(data_size: int, external_test_size: int, seed: int) -> str:
 
 def main() -> None:
     args = parse_args()
+    # Resolve to absolute paths so the generated configs stay valid no matter
+    # which directory training is later launched from.
+    args.output_dir = args.output_dir.resolve()
+    args.data_root = args.data_root.resolve()
+    args.run_dir = args.run_dir.resolve()
     args.output_dir.mkdir(parents=True, exist_ok=True)
     args.run_dir.mkdir(parents=True, exist_ok=True)
 

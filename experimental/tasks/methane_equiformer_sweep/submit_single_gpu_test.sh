@@ -15,7 +15,7 @@ SOURCE_DATA_DIR="$PROJECT_ROOT/experimental/datasets"
 DATA_FILE="$SOURCE_DATA_DIR/methane.extxyz"
 ARCHIVE="$DATA_FILE.gz"
 DOWNLOAD_URL="https://archive.materialscloud.org/records/kz78r-6nx43/files/methane.extxyz.gz?download=1"
-EXPECTED_MD5="11cf7303d8c0fa6ef753103f5439d6e"
+EXPECTED_MD5="11cf7303d8c0fa6ef753103f5439d6e1"
 LOCAL_METHANE_FILE="${LOCAL_METHANE_FILE:-$HOME/Github/hippynn-optimizations-expanded/datasets/methane.extxyz}"
 
 MODEL_SEED="${MODEL_SEED:-42}"

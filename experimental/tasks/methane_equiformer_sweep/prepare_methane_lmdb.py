@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import gzip
 import json
 import pickle
 import re
@@ -274,9 +275,16 @@ def convert_methane_atoms(atoms: Atoms, molecule_cell_size: float) -> Data:
     )
 
 
+def open_methane_extxyz(path: Path):
+    """Open a plain or gzipped extxyz for text reading."""
+    if path.suffix == ".gz":
+        return gzip.open(path, "rt", encoding="utf-8")
+    return path.open("r", encoding="utf-8")
+
+
 def iter_methane_extxyz(path: Path):
     """Stream this fixed-size CH4 extxyz without ASE's full-file index scan."""
-    with path.open("r", encoding="utf-8") as handle:
+    with open_methane_extxyz(path) as handle:
         frame_index = 0
         while True:
             count_line = handle.readline()
