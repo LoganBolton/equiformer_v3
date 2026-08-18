@@ -304,10 +304,23 @@ export PYTHONFAULTHANDLER=1
 export MPLCONFIGDIR="${MPLCONFIGDIR:-$RUN_BASE/mplconfig}"
 mkdir -p "$MPLCONFIGDIR"
 
+# Fair-Chem resumes on its own: BaseTask.setup loads checkpoints/<name>/
+# checkpoint.pt whenever that file exists, restoring the step, optimizer, LR
+# scheduler, and best-metric state. The run tag carries no timestamp, so that
+# path is identical on every invocation with the same MODE, LMAX, and seed, and
+# an interrupted run continues where it stopped. Say which case this is, the way
+# run_a100_single_gpu_full.slurm does.
+LATEST_CHECKPOINT="$RUN_DIR/checkpoints/$NAME/checkpoint.pt"
+
 echo "--- Training ---"
 echo "  config: $CONFIG"
 echo "  output: $RUN_DIR"
 echo "  logs:   tensorboard --logdir $SCRIPT_DIR/runs"
+if [ -f "$LATEST_CHECKPOINT" ]; then
+    echo "  resume: $LATEST_CHECKPOINT"
+else
+    echo "  resume: no checkpoint yet; starting from scratch"
+fi
 echo
 
 cd "$PROJECT_ROOT"
